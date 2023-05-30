@@ -388,30 +388,30 @@ class SPARUNZIP:
    
 
 
-#%%
-# # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
-# # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
-# # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
-kernel_size = 9     
-rel_thresh = 0.45
-
-#%%
-z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=True)
 # #%%
-#%%
-plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-#%%
-z.deflate_encode()
-# #%% 
-# start = time.time()
-# u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1.npz','/Users/dimos/Desktop/tub_peaks_bp2.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
-# end = time.time()
-# print (end-start)
+# # # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
+# # # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
+# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
+# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
+# kernel_size = 9     
+# rel_thresh = 0.45
 
-# # # %%
-# u.inflate()
-# %%
-z.bp1.blocks[0:1,0].compute()
+# #%%
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=True)
+# # #%%
+# #%%
+# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
+# #%%
+# z.deflate_encode()
+# # #%% 
+# # start = time.time()
+# # u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1.npz','/Users/dimos/Desktop/tub_peaks_bp2.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
+# # end = time.time()
+# # print (end-start)
+
+# # # # %%
+# # u.inflate()
+# # %%
+# z.bp1.blocks[0:1,0].compute()
 # %%
