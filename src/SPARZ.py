@@ -20,6 +20,7 @@ from reader import imread as vimread
 import dask
 # dask.config.set(scheduler='threads')
 from concurrent.futures import ThreadPoolExecutor
+from dask import compute
 
 
 #%%
@@ -277,9 +278,8 @@ class SPARZIP:
         end = time.time()
         print('Deflate completed in ', (end-start)/60, ' minutes')
 
-    
+
     def encode(self):
-        
         compression_levels = {0: {
                                                 '-vcodec': 'libx265',
                                                 '-pix_fmt': 'yuv444p12le',
@@ -310,21 +310,81 @@ class SPARZIP:
                         }
 
         print('Compressing video...')
+
         writer1 = FFmpegWriter(f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}.mp4',
-                                         outputdict=compression_levels[self.compression_level]
+                                        outputdict=compression_levels[self.compression_level]
                                         )                                         
 
         writer2 = FFmpegWriter(f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}.mp4',
-                                         outputdict=compression_levels[self.compression_level]
-                                         )
-        
+                                        outputdict=compression_levels[self.compression_level]
+                                        )
+
+        # Rechunk the array to have many small chunks
+        # bp1 = self.bp1.rechunk((-1, 'auto', 'auto'))
+        # bp2 = self.bp2.rechunk((-1, 'auto', 'auto')) if not self.single_plane else None
+
+        writes = []
         for i in range(self.bp1.numblocks[0]):
-            writer1.writeFrame(self.bp1.blocks[i,0].compute())
-            if self.single_plane == False:
-                writer2.writeFrame(self.bp2.blocks[i,0].compute())
+            write1 = delayed(writer1.writeFrame)(self.bp1.blocks[i,0])
+            writes.append(write1)
+
+            if not self.single_plane:
+                write2 = delayed(writer2.writeFrame)(self.bp2.blocks[i,0])
+                writes.append(write2)
+
+        compute(*writes)
+
         writer1.close()
-        if self.single_plane == False:
+        if not self.single_plane:
             writer2.close()
+    
+    # def encode(self):
+        
+    #     compression_levels = {0: {
+    #                                             '-vcodec': 'libx265',
+    #                                             '-pix_fmt': 'yuv444p12le',
+    #                                             '-channels': '1',
+    #                                             '-x265-params': 'lossless=1',
+    #                                      },
+    #                         1:{
+    #                                          '-vcodec': 'libx265',
+    #                                          '-crf': 0,
+    #                                          '-pix_fmt': 'yuv444p12le',
+    #                                          '-channels': '1'
+    #                                      },
+    #                         2:{
+    #                                          '-vcodec': 'libx265',
+    #                                          '-crf': 10,
+    #                                          '-pix_fmt': 'yuv444p12le',
+    #                                          '-channels': '1'
+    #                                      },
+
+    #                         3:{
+    #                                          '-vcodec': 'libx265',
+    #                                          '-crf': 15,
+    #                                          '-pix_fmt': 'yuv444p12le',
+    #                                          '-channels': '1'
+    #                                      }                                      
+                                         
+                                         
+    #                     }
+
+    #     print('Compressing video...')
+    #     writer1 = FFmpegWriter(f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}.mp4',
+    #                                      outputdict=compression_levels[self.compression_level]
+    #                                     )                                         
+
+    #     writer2 = FFmpegWriter(f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}.mp4',
+    #                                      outputdict=compression_levels[self.compression_level]
+    #                                      )
+        
+    #     for i in range(self.bp1.numblocks[0]):
+    #         writer1.writeFrame(self.bp1.blocks[i,0].compute())
+    #         if self.single_plane == False:
+    #             writer2.writeFrame(self.bp2.blocks[i,0].compute())
+    #     writer1.close()
+    #     if self.single_plane == False:
+    #         writer2.close()
     
     def deflate_encode(self):
         start = time.time()
@@ -388,22 +448,22 @@ class SPARUNZIP:
    
 
 
-# #%%
-# # # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
-# # # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
+#%%
+path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
+path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
 # path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
 # path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
 # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
-# kernel_size = 9     
-# rel_thresh = 0.45
+kernel_size = 9     
+rel_thresh = 0.45
 
-# #%%
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=True)
+#%%
+z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=True)
 # # #%%
 # #%%
 # plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-# #%%
-# z.deflate_encode()
+#%%
+z.deflate_encode()
 # # #%% 
 # # start = time.time()
 # # u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1.npz','/Users/dimos/Desktop/tub_peaks_bp2.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
