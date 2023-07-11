@@ -331,8 +331,9 @@ class SPARZIP:
             if not self.single_plane:
                 write2 = delayed(writer2.writeFrame)(self.bp2.blocks[i,0])
                 writes.append(write2)
-
-        compute(*writes)
+        
+        with dask.config.set(scheduler='threads'):
+            compute(*writes)
 
         writer1.close()
         if not self.single_plane:
