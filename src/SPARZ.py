@@ -331,9 +331,14 @@ class SPARZIP:
             if not self.single_plane:
                 write2 = delayed(writer2.writeFrame)(self.bp2.blocks[i,0])
                 writes.append(write2)
+        try:
+            with dask.config.set(scheduler='threads'):
+                compute(*writes)
         
-        with dask.config.set(scheduler='threads'):
-            compute(*writes)
+        except AttributeError:
+            print('WARNING: Parallel writing failed. Writing frames sequentially.')
+            for write in writes:
+                write.compute()
 
         writer1.close()
         if not self.single_plane:
