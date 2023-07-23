@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dask import compute
 import ffmpeg
 import gc
+from tqdm import tqdm
 
 import logging
 
@@ -389,7 +390,18 @@ class SPARZIP:
         # Now compute all writes at once
         try:
             with dask.config.set(scheduler='threads'):
-                compute(*all_writes)
+                progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
+
+                batch_size = 100
+
+                # Iterate through all_writes in batches of size batch_size
+                for i in range(0, len(all_writes), batch_size):
+                    batch = all_writes[i:i+batch_size]
+                    dask.compute(*batch)
+
+                    progress_bar.update(batch_size)
+                progress_bar.close()
+                # compute(*all_writes)
         except AttributeError:
             print('WARNING: Parallel writing failed. Writing frames sequentially.')
             for write in all_writes:
@@ -633,10 +645,10 @@ class SPARUNZIP:
 
 
 #%%
-path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
-path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
+# path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
+path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
+path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
 # # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
 kernel_size = 9     
 rel_thresh = 0.45
@@ -651,7 +663,9 @@ z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_fi
 # plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
 #%%)
 #%%
-z.deflate()
+z.processed_bp1
+#%%
+z.encode()
 #%% 
 start = time.time()
 u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1_part_0.npz','/Users/dimos/Desktop/tub_peaks_bp2_part_0.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0_part_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0_part_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
