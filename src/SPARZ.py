@@ -40,7 +40,8 @@ class SPARZIP:
                  rel_threshold:float = 0.5, 
                  epsilon:int = 12, 
                  kernel_size:int = 3, 
-                 comp_level:int=0, 
+                 compression_level:int=0,
+                 batch_size:int=100, 
                  reflect_bp2:bool = False, 
                  align_planes:bool=False):
       
@@ -84,7 +85,8 @@ class SPARZIP:
         self.rel_threshold = rel_threshold
         self.epsilon = epsilon
         self.kernel_size = kernel_size
-        self.compression_level = comp_level
+        self.compression_level = compression_level
+        self.batch_size = batch_size
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -313,19 +315,26 @@ class SPARZIP:
     #     end = time.time()
     #     print('Deflate completed in ', (end-start)/60, ' minutes')
 
+
     def deflate(self):
         start = time.time()
         print('Deflating images...')
         with dask.config.set(scheduler='threads'):
             # Prepare a list to store delayed operations
             saves = []
-            for i in range(len(self.processed_bp1)):
+            for i in range(0, len(self.processed_bp1), self.batch_size):
                 # Directly append delayed save_npz operations to the list
                 saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i].compute()))
                 if self.single_plane == False:
                     saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i].compute()))
             # Perform the save_npz operations
-            dask.compute(*saves)
+            progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
+            for i in range(0, len(saves), self.batch_size):
+                batch = saves[i:i+self.batch_size]
+                dask.compute(*batch)
+
+                progress_bar.update(self.batch_size)
+            progress_bar.close()
         end = time.time()
         print('Deflate completed in ', (end-start)/60, ' minutes')
 
@@ -392,20 +401,21 @@ class SPARZIP:
             with dask.config.set(scheduler='threads'):
                 progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
 
-                batch_size = 100
 
                 # Iterate through all_writes in batches of size batch_size
-                for i in range(0, len(all_writes), batch_size):
-                    batch = all_writes[i:i+batch_size]
+                for i in range(0, len(all_writes), self.batch_size):
+                    batch = all_writes[i:i+self.batch_size]
                     dask.compute(*batch)
 
-                    progress_bar.update(batch_size)
+                    progress_bar.update(self.batch_size)
                 progress_bar.close()
                 # compute(*all_writes)
         except AttributeError:
             print('WARNING: Parallel writing failed. Writing frames sequentially.')
             for write in all_writes:
                 write.compute()
+                progress_bar.update(self.batch_size)
+            progress_bar.close()
 
         # Close all writers
         for writer in all_writers:
