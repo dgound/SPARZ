@@ -264,6 +264,7 @@ class SPARZIP:
         if start_frame is None:
             # raise ValueError('Please provide a start frame.')
             print ('No starting frame provided. Using frame 0.')
+            start_frame = 0
         if end_frame is None:
             print('No end frame provided. Using starting_frame+1.')
             end_frame = start_frame+1
