@@ -19,11 +19,12 @@ from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
 # dask.config.set(scheduler='threads')
-from concurrent.futures import ThreadPoolExecutor
+# from concurrent.futures import ThreadPoolExecutor
 from dask import compute
-import ffmpeg
+# import ffmpeg
 import gc
 from tqdm import tqdm
+
 
 import logging
 
@@ -323,7 +324,7 @@ class SPARZIP:
         with dask.config.set(scheduler='threads'):
             # Prepare a list to store delayed operations
             saves = []
-            for i in range(0, len(self.processed_bp1), self.batch_size):
+            for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
                 saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i].compute()))
                 if self.single_plane == False:
@@ -398,25 +399,26 @@ class SPARZIP:
                 all_writers.append(writer2)
 
         # Now compute all writes at once
-        try:
-            with dask.config.set(scheduler='threads'):
-                progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
+        # try:
+        #     with dask.config.set(scheduler='single-threaded'):
+        #         progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
 
 
-                # Iterate through all_writes in batches of size batch_size
-                for i in range(0, len(all_writes), self.batch_size):
-                    batch = all_writes[i:i+self.batch_size]
-                    dask.compute(*batch)
+        #         # Iterate through all_writes in batches of size batch_size
+        #         for i in range(0, len(all_writes), self.batch_size):
+        #             batch = all_writes[i:i+self.batch_size]
+        #             dask.compute(*batch)
 
-                    progress_bar.update(self.batch_size)
-                progress_bar.close()
-                # compute(*all_writes)
-        except AttributeError:
-            print('WARNING: Parallel writing failed. Writing frames sequentially.')
-            for write in all_writes:
-                write.compute()
-                progress_bar.update(self.batch_size)
-            progress_bar.close()
+        #             progress_bar.update(self.batch_size)
+        #         progress_bar.close()
+        #         # compute(*all_writes)
+        # except AttributeError:
+            # print('WARNING: Parallel writing failed. Writing frames sequentially.')
+        progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
+        for write in all_writes:
+            write.compute()
+            progress_bar.update(1)
+        progress_bar.close()
 
         # Close all writers
         for writer in all_writers:
@@ -658,33 +660,40 @@ class SPARUNZIP:
 #%%
 # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
 # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
+# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
+# path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
 # # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
-kernel_size = 9     
-rel_thresh = 0.45
+# kernel_size = 9     
+# rel_thresh = 0.45
 
 #%%
-z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=False)
+# start = time.time()
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=False,align_planes=False,batch_size=50)
+# print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 # # #%%
 # #%%
 # plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
 # zz = z.get_processed_frame(start_frame=10)[0,:,:]
 #%%
 # plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-#%%)
 #%%
-z.processed_bp1
+# start = time.time()
+# z.encode()
+# print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%%
-z.encode()
+# start = time.time()
+# z.deflate()
+# print('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%% 
-start = time.time()
-u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1_part_0.npz','/Users/dimos/Desktop/tub_peaks_bp2_part_0.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0_part_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0_part_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
-end = time.time()
-print (end-start)
+# start = time.time()
+# u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1_part_0.npz','/Users/dimos/Desktop/tub_peaks_bp2_part_0.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0_part_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0_part_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
+# end = time.time()
+# print (end-start)
 
 # # # # %%
-u.inflate()
+# u.inflate()
 # # %%
 # z.bp1.blocks[0:1,0].compute()
 # %%
