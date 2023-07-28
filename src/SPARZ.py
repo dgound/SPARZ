@@ -8,28 +8,17 @@ import glob
 import time
 import sparse
 from skimage.registration import phase_cross_correlation
-# from scipy.ndimage import fourier_shift
 from scipy.ndimage import shift
-# from concurrent import futures
-# import multiprocessing
 import dask.array as da
 import dask_image.imread
 from dask import delayed
 from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
-# dask.config.set(scheduler='threads')
-# from concurrent.futures import ThreadPoolExecutor
 from dask import compute
-# import ffmpeg
 import gc
 from tqdm import tqdm
 
-
-import logging
-
-# Set up a basic logging configuration
-logging.basicConfig(level=logging.DEBUG)
 
 
 #%%
@@ -213,35 +202,7 @@ class SPARZIP:
             
         return [p.map_blocks(lambda x: shift(x, shifts, mode='constant')) for p in plane2]
 
-            
 
-    # def align_planes(self, plane1:np.ndarray, plane2:np.ndarray):
-        
-    #     print('Aligning planes, please wait...')
-    #     frames = plane1.shape[0]
-    #     # print (frames)
-
-    #     if frames < 50:
-    #         print('all')
-    #         shifts, _, _ = phase_cross_correlation(plane1, plane2,
-    #                                                     upsample_factor=100)
-    #         # offset_image = fourier_shift(np.fft.fftn(plane2), shifts)
-    #         print(f'shift: {shifts}')
-    #         return plane2.map_blocks(lambda x: shift(x, shifts, mode='constant'))
-        
-    #     sample = np.random.randint(int(frames*0.4), int(frames*0.6),150)
-        
-    #     shifts_list =[]
-    #     for s in sample:
-    #         shifts, _, _ = phase_cross_correlation(plane1.blocks[s].compute(), plane2.blocks[s].compute(),
-    #                                                     upsample_factor=100)
-    #         shifts_list.append(shifts)
-    #     tmp_shift = np.mean(shifts_list, axis=0)
-    #     mean_shift = np.zeros(3)
-    #     mean_shift[1:] = tmp_shift
-    #     print(f'Applying mean shift {mean_shift[1:]} to all frames.')
-
-    #     return plane2.map_blocks(lambda x: shift(x, mean_shift, mode='constant'))
     def get_raw_frame(self,index:int=None,start_frame:int=None,end_frame:int=None,plane:str='bp1'):
         if index is None:
             print ('No index provided. Using index 0.')
@@ -305,21 +266,8 @@ class SPARZIP:
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
     
 
-    # def deflate(self):
-    #     start = time.time()
-    #     print('Deflating images...')
-    #     with dask.config.set(scheduler='threads'):
-    #         # sparse.save_npz(self.output_path+self.output_path+self.stem+'_peaks_bp1.npz',self.processed_bp1.compute())
-    #         [sparse.save_npz(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i].compute()) for i in range(len(self.processed_bp1))]
-    #         if self.single_plane == False:
-    #             # sparse.save_npz(self.output_path+self.output_path+self.stem+'_peaks_bp2.npz',self.processed_bp2.compute())
-    #             [sparse.save_npz(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i].compute()) for i in range(len(self.processed_bp2))]
-    #     end = time.time()
-    #     print('Deflate completed in ', (end-start)/60, ' minutes')
-
 
     def deflate(self):
-        start = time.time()
         print('Deflating images...')
         with dask.config.set(scheduler='threads'):
             # Prepare a list to store delayed operations
@@ -338,7 +286,6 @@ class SPARZIP:
                 progress_bar.update(self.batch_size)
             progress_bar.close()
         end = time.time()
-        print('Deflate completed in ', (end-start)/60, ' minutes')
 
 
     def encode(self):
@@ -398,22 +345,6 @@ class SPARZIP:
             if not self.single_plane:
                 all_writers.append(writer2)
 
-        # Now compute all writes at once
-        # try:
-        #     with dask.config.set(scheduler='single-threaded'):
-        #         progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
-
-
-        #         # Iterate through all_writes in batches of size batch_size
-        #         for i in range(0, len(all_writes), self.batch_size):
-        #             batch = all_writes[i:i+self.batch_size]
-        #             dask.compute(*batch)
-
-        #             progress_bar.update(self.batch_size)
-        #         progress_bar.close()
-        #         # compute(*all_writes)
-        # except AttributeError:
-            # print('WARNING: Parallel writing failed. Writing frames sequentially.')
         progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
         for write in all_writes:
             write.compute()
@@ -424,187 +355,10 @@ class SPARZIP:
         for writer in all_writers:
             writer.close()
 
-        # print('Compressing video...')
-        
-        # for k in range(len(self.processed_bp1)):
-        #     writer1 = FFmpegWriter(f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}_part_{k}.mp4',
-        #                                     outputdict=compression_levels[self.compression_level]
-        #                                     )                                         
-
-        #     writer2 = FFmpegWriter(f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}_part_{k}.mp4',
-        #                                     outputdict=compression_levels[self.compression_level]
-        #                                     )
-
-        # # Rechunk the array to have many small chunks
-        # # bp1 = self.bp1.rechunk((-1, 'auto', 'auto'))
-        # # bp2 = self.bp2.rechunk((-1, 'auto', 'auto')) if not self.single_plane else None
-
-        #     writes = []
-        #     for i in range(self.bp1[k].numblocks[0]):
-        #         write1 = delayed(writer1.writeFrame)(self.bp1[k].blocks[i,0])
-        #         writes.append(write1)
-
-        #         if not self.single_plane:
-        #             write2 = delayed(writer2.writeFrame)(self.bp2[k].blocks[i,0])
-        #             writes.append(write2)
-        #     try:
-        #         with dask.config.set(scheduler='threads'):
-        #             compute(*writes)
-        
-        #     except AttributeError:
-        #         print('WARNING: Parallel writing failed. Writing frames sequentially.')
-        #         for write in writes:
-        #             write.compute()
-
-        #     writer1.close()
-        #     if not self.single_plane:
-        #         writer2.close()
-    
-    # def encode(self):
-        
-    #     compression_levels = {0: {
-    #                                             '-vcodec': 'libx265',
-    #                                             '-pix_fmt': 'yuv444p12le',
-    #                                             '-channels': '1',
-    #                                             '-x265-params': 'lossless=1',
-    #                                      },
-    #                         1:{
-    #                                          '-vcodec': 'libx265',
-    #                                          '-crf': 0,
-    #                                          '-pix_fmt': 'yuv444p12le',
-    #                                          '-channels': '1'
-    #                                      },
-    #                         2:{
-    #                                          '-vcodec': 'libx265',
-    #                                          '-crf': 10,
-    #                                          '-pix_fmt': 'yuv444p12le',
-    #                                          '-channels': '1'
-    #                                      },
-
-    #                         3:{
-    #                                          '-vcodec': 'libx265',
-    #                                          '-crf': 15,
-    #                                          '-pix_fmt': 'yuv444p12le',
-    #                                          '-channels': '1'
-    #                                      }                                      
-                                         
-                                         
-    #                     }
-
-    #     print('Compressing video...')
-    #     writer1 = FFmpegWriter(f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}.mp4',
-    #                                      outputdict=compression_levels[self.compression_level]
-    #                                     )                                         
-
-    #     writer2 = FFmpegWriter(f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}.mp4',
-    #                                      outputdict=compression_levels[self.compression_level]
-    #                                      )
-        
-    #     for i in range(self.bp1.numblocks[0]):
-    #         writer1.writeFrame(self.bp1.blocks[i,0].compute())
-    #         if self.single_plane == False:
-    #             writer2.writeFrame(self.bp2.blocks[i,0].compute())
-    #     writer1.close()
-    #     if self.single_plane == False:
-    #         writer2.close()
-
-    def encode2(self):
-
-        compression_levels = {0: {
-                                                '-vcodec': 'libx265',
-                                                '-pix_fmt': 'yuv444p12le',
-                                                '-channels': '1',
-                                                '-x265-params': 'lossless=1',
-                                         },
-                            1:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '0',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
-                                         },
-                            2:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '10',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
-                                         },
-
-                            3:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '15',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
-                                         }                                      
-                                         
-                                         
-                        }
-        
-        # Create a subprocess for each video file
-        import subprocess
-        process1 = subprocess.Popen([
-            'ffmpeg', 
-            '-y', 
-            '-f', 
-            'rawvideo',
-            '-vcodec', 
-            'rawvideo', 
-            '-pix_fmt', 
-            'yuv444p12le', 
-            # '-s', '{}x{}'.format(*self.bp1.shape), 
-            '-r', '24', 
-            # '-i', '-', 
-            # '-an', 
-            '-vcodec', 'libx265', 
-            '-crf', '0', 
-            '-preset', 'ultrafast', f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}.mp4'], stdin=subprocess.PIPE)
-
-        process2 = subprocess.Popen([
-            'ffmpeg', 
-            '-y', 
-            '-f', 'rawvideo', 
-            '-vcodec', 'rawvideo', 
-            '-pix_fmt', 'yuv444p12le', 
-            # '-s', '{}x{}'.format(*self.bp2.shape), 
-            '-r', '24', 
-            # '-i', '-', 
-            # '-an', 
-            '-vcodec', 'libx265', 
-            '-crf', '0', 
-            '-preset', 'ultrafast', 
-            f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}.mp4'], stdin=subprocess.PIPE)
-        
-        # Prepare the blocks for writing
-        writes = []
-        print (type(self.bp1))
-        for i in range(self.bp1.numblocks[0]):
-            frame1 = self.bp1.blocks[i, 0].compute()
-            frame2 = self.bp2.blocks[i, 0].compute()
-            writes.append(delayed(self.write_frame)(process1, frame1))
-            writes.append(delayed(self.write_frame)(process2, frame2))
-        
-        # Perform the writeFrame operations
-        compute(*writes)
-
-        # Close the subprocesses
-        process1.stdin.close()
-        process1.wait()
-        process2.stdin.close()
-        process2.wait()
-
-    def write_frame(self, process, frame):
-        process.stdin.write(frame.tobytes())
-
         
     def deflate_encode(self):
-        start = time.time()
-        print('Deflating images...')
-        with dask.config.set(scheduler='threads'):
-            sparse.save_npz(self.output_path+self.stem+'_peaks_bp1.npz',self.processed_bp1.compute())
-            if self.single_plane == False:
-                sparse.save_npz(self.output_path+self.stem+'_peaks_bp2.npz',self.processed_bp2.compute())
+        self.deflate()
         self.encode()
-        end = time.time()
-        print('Deflate completed in ', (end-start)/60, ' minutes')
 
 
 class SPARUNZIP:
