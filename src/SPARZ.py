@@ -27,9 +27,9 @@ class SPARZIP:
                  stem:str, 
                  output_path:str,
                  path_image_files2:str = None,
-                 rel_threshold:float = 0.5, 
+                 relative_threshold:float = 0.45, 
                  epsilon:int = 12, 
-                 kernel_size:int = 3, 
+                 kernel_size:int = 9, 
                  compression_level:int=0,
                  batch_size:int=100, 
                  reflect_bp2:bool = False, 
@@ -46,7 +46,7 @@ class SPARZIP:
             path to the second image file
         stem : str
             stem of the output file
-        rel_threshold : float, optional
+        relative_threshold : float, optional
             relative threshold for peak finding, by default 0.5
         epsilon : int, optional
             epsilon for peak finding, by default 12
@@ -72,7 +72,7 @@ class SPARZIP:
             self.output_path = output_path+"/"
         else:
             self.output_path = output_path
-        self.rel_threshold = rel_threshold
+        self.rel_threshold = relative_threshold
         self.epsilon = epsilon
         self.kernel_size = kernel_size
         self.compression_level = compression_level
@@ -424,7 +424,7 @@ class SPARUNZIP:
 
 #%%
 # start = time.time()
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=False,align_planes=False,batch_size=50)
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50)
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 # # #%%
 # #%%
