@@ -1,0 +1,9 @@
+Metadata-Version: 2.1
+Name: SPARZ
+Version: 0.1
+Summary: Compress Single Molecule Localization Microscopy Data
+Home-page: https://github.com/your_username/your_package
+Author: Dimos Gkountaroulis, Antonios Lioutas, Lian Jiang, and Laura Breimann
+Author-email: dimos.gkountaroulis@bcm.edu
+
+Compression of Single Molecule Localization Microscopy Data using Sparse matrices and h265 video compression
