@@ -424,7 +424,7 @@ class SPARUNZIP:
 
 #%%
 # start = time.time()
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50)
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=3)
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 # # #%%
 # #%%
@@ -434,7 +434,7 @@ class SPARUNZIP:
 # plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
 #%%
 # start = time.time()
-# z.encode()
+# z.deflate_encode()
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%%
 # start = time.time()
