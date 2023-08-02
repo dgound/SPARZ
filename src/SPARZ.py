@@ -364,7 +364,7 @@ class SPARZIP:
 class SPARUNZIP:
     def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str):
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
-        self.shapes = self.encoded_bp1.shape[:3]
+        self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
         self.processed_bp1, self.processed_bp2 = self.process_frames()
         self.stem = stem
@@ -375,17 +375,33 @@ class SPARUNZIP:
 
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
-        bp1 = da.from_array(sparse.load_npz(sparse_bp1), chunks=(1,shapes[1],shapes[2]))
-        bp2 = da.from_array(sparse.load_npz(sparse_bp2), chunks=(1,shapes[1],shapes[2]))
-        return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
+        files_bp1 = sorted(glob.glob(sparse_bp1))
+        files_bp2 = sorted(glob.glob(sparse_bp2))
+        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+        bp1,bp2 = [],[]
+        for i in range(len(files_bp1)):
+            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            # bp1 = da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[1],shapes[2]))
+            # bp2 = da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[1],shapes[2]))
+        return bp1, bp2
+        # return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
     
     def decode(self, path_bp1:str, path_bp2:str):
         print('Decoding images...')
-        return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
+        files_bp1 = sorted(glob.glob(path_bp1))
+        files_bp2 = sorted(glob.glob(path_bp2))
+        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+        bp1, bp2 = [], []
+        for i in range(len(files_bp1)):
+            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+            bp2.append(vimread(files_bp2[i], dtypes='uint16'))
+        return bp1, bp2
+        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
     
     def process_frames(self):
         print('Lazily Processing images...')
-        return da.where(self.sparse_bp1!=0,self.sparse_bp1,self.encoded_bp1), da.where(self.sparse_bp2!=0,self.sparse_bp2,self.encoded_bp2)
+        return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
 
     # def save_file(self,arr, block_info=None):
     #     """ Save file to foo-x-y.tif, where x and y are block locations """
@@ -395,32 +411,33 @@ class SPARUNZIP:
 
     def inflate(self):
         print('Inflating images...')
-        num_frames = self.encoded_bp1.shape[0]
+        for k in range(len(self.encoded_bp1)):
+            num_frames = self.encoded_bp1[k].shape[0]
 
-        chunk_size = 10  # Adjust this to a suitable size for your data and memory
+            chunk_size = 10  # Adjust this to a suitable size for your data and memory
 
-        filename1 = f'{self.output_path}{self.stem}_bp1_multipage.tiff'
-        filename2 = f'{self.output_path}{self.stem}_bp2_multipage.tiff'
+            filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+            filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
 
-        with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-            for i in range(0, num_frames, chunk_size):
-                chunk = self.encoded_bp1[i:i+chunk_size].compute()  # Compute a chunk of frames
-                for frame in chunk:
-                    tif.write(frame, photometric='minisblack')
+            with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                for i in range(0, num_frames, chunk_size):
+                    chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                    for frame in chunk:
+                        tif.write(frame, photometric='minisblack')
 
-        with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-            for i in range(0, num_frames, chunk_size):
-                chunk = self.encoded_bp2[i:i+chunk_size].compute()  # Compute a chunk of frames
-                for frame in chunk:
-                    tif.write(frame, photometric='minisblack')
+            with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                for i in range(0, num_frames, chunk_size):
+                    chunk = self.encoded_bp2[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                    for frame in chunk:
+                        tif.write(frame, photometric='minisblack')
 
 
 
 #%%
 # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
 # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_01_01_bp1.tiff'
-# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_01_01_bp2.tiff'
+# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
+# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
 # path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
 # path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
 # # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
@@ -429,7 +446,7 @@ class SPARUNZIP:
 
 #%%
 # start = time.time()
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=0)
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=3)
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 # # #%%
 # #%%
@@ -447,10 +464,10 @@ class SPARUNZIP:
 # print('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%% 
 # start = time.time()
-# u=SPARUNZIP('/Users/dimos/Desktop/test/tub_peaks_bp1_part_0.npz',
-#             '/Users/dimos/Desktop/test/tub_peaks_bp2_part_0.npz',
-#             '/Users/dimos/Desktop/test/tub_bp1_compression_level_0_part_0.mp4',
-#             '/Users/dimos/Desktop/test/tub_bp2_compression_level_0_part_0.mp4',
+# u=SPARUNZIP('/Users/dimos/Desktop/test/tub_*bp1*.npz',
+#             '/Users/dimos/Desktop/test/tub_*bp2*.npz',
+#             '/Users/dimos/Desktop/test/tub_*bp1*.mp4',
+#             '/Users/dimos/Desktop/test/tub_*bp2*.mp4',
 #             output_path="/Users/dimos/Desktop/test/",stem='nir')
 # end = time.time()
 # print (end-start)
@@ -462,4 +479,3 @@ class SPARUNZIP:
 # print (end-start)
 # # %%
 # z.bp1.blocks[0:1,0].compute()
-# %%
