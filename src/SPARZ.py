@@ -392,30 +392,35 @@ class SPARUNZIP:
     #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
     #     tifffile.imwrite(filename, arr, photometric='minisblack')
     #     return arr
-    
+
     def inflate(self):
         print('Inflating images...')
         num_frames = self.encoded_bp1.shape[0]
-        print (num_frames)
-        for i in range(num_frames):
-            tifffile.imwrite(f'{self.output_path}{self.stem}_bp1_{i:0{len(str(num_frames))}}.tiff', self.encoded_bp1[i].compute(), photometric='minisblack')
-            tifffile.imwrite(f'{self.output_path}{self.stem}_bp2_{i:0{len(str(num_frames))}}.tiff', self.encoded_bp2[i].compute(), photometric='minisblack')
 
-        # self.encoded_bp1.map_blocks(self.save_file, dtype=self.encoded_bp1.dtype).compute()
-        
-  
-        
+        chunk_size = 10  # Adjust this to a suitable size for your data and memory
 
+        filename1 = f'{self.output_path}{self.stem}_bp1_multipage.tiff'
+        filename2 = f'{self.output_path}{self.stem}_bp2_multipage.tiff'
 
-        
-   
+        with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+            for i in range(0, num_frames, chunk_size):
+                chunk = self.encoded_bp1[i:i+chunk_size].compute()  # Compute a chunk of frames
+                for frame in chunk:
+                    tif.write(frame, photometric='minisblack')
+
+        with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+            for i in range(0, num_frames, chunk_size):
+                chunk = self.encoded_bp2[i:i+chunk_size].compute()  # Compute a chunk of frames
+                for frame in chunk:
+                    tif.write(frame, photometric='minisblack')
+
 
 
 #%%
 # path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
 # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_01_01_bp1.tiff'
+# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_01_01_bp2.tiff'
 # path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
 # path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
 # # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
@@ -424,7 +429,7 @@ class SPARUNZIP:
 
 #%%
 # start = time.time()
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=3)
+# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=0)
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 # # #%%
 # #%%
@@ -442,13 +447,19 @@ class SPARUNZIP:
 # print('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%% 
 # start = time.time()
-# u=SPARUNZIP('/Users/dimos/Desktop/tub_peaks_bp1_part_0.npz','/Users/dimos/Desktop/tub_peaks_bp2_part_0.npz','/Users/dimos/Desktop/tub_bp1_compression_level_0_part_0.mp4','/Users/dimos/Desktop/tub_bp2_compression_level_0_part_0.mp4',output_path="/Users/dimos/Desktop/test/",stem='nir')
+# u=SPARUNZIP('/Users/dimos/Desktop/test/tub_peaks_bp1_part_0.npz',
+#             '/Users/dimos/Desktop/test/tub_peaks_bp2_part_0.npz',
+#             '/Users/dimos/Desktop/test/tub_bp1_compression_level_0_part_0.mp4',
+#             '/Users/dimos/Desktop/test/tub_bp2_compression_level_0_part_0.mp4',
+#             output_path="/Users/dimos/Desktop/test/",stem='nir')
 # end = time.time()
 # print (end-start)
 
-# # # # %%
+#%%
+# start = time.time()
 # u.inflate()
+# end = time.time()
+# print (end-start)
 # # %%
 # z.bp1.blocks[0:1,0].compute()
-# %%
 # %%
