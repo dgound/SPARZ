@@ -1,0 +1,12 @@
+numpy
+scikit-image
+scipy
+dask
+dask-image
+matplotlib
+scikit-video
+tifffile
+pims
+sparse
+av
+jinja2
