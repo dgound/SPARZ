@@ -8,7 +8,7 @@ from h5r_functions import h5r_to_df
 
 #%%
 #Import localizations from h5r file
-filepath = '/Users/alioutas/Desktop/random/sequence-MT0.N1.HD-BP.h5r'
+filepath = '/Users/alioutas/Desktop/random/sequence-MT0.N1.HD-BP_h265.h5r'
 locs = h5r_to_df(filepath=filepath)
 
 #%%
@@ -59,4 +59,7 @@ plt.show()
 locs[~((locs["fitResults_x0"] > 0) & (locs["fitResults_x0"] < 6500) & (locs["fitResults_y0"] > 0) & (locs["fitResults_y0"] < 6500))].index
 # %%
 locs.loc[locs[~((locs["fitResults_x0"] > 0) & (locs["fitResults_x0"] < 6500) & (locs["fitResults_y0"] > 0) & (locs["fitResults_y0"] < 6500))].index]
+# %%
+len(locs.loc[locs[~((locs["fitResults_x0"] > 0) & (locs["fitResults_x0"] < 6500) & (locs["fitResults_y0"] > 0) & (locs["fitResults_y0"] < 6500))].index])
+
 # %%
