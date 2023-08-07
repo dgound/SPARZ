@@ -457,8 +457,11 @@ class SPARUNZIP:
 #path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
 #path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
 
-path2 = '/Users/alioutas/Dropbox (HMS)/data_compression/dimos/compression/nir_et_al/raw_bp2/*.tiff'
-path1 = '/Users/alioutas/Dropbox (HMS)/data_compression/dimos/compression/nir_et_al/raw_bp1/*.tiff'
+path2 = '/Users/alioutas/Dropbox (HMS)/data_compression/dimos/compression/nir_et_al/raw_bp2/img_01_*.tiff'
+path1 = '/Users/alioutas/Dropbox (HMS)/data_compression/dimos/compression/nir_et_al/raw_bp1/img_01_*.tiff'
+
+# path2 = '/Users/alioutas/Dropbox (HMS)/data_compression/data/synth_MT/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# path1 = '/Users/alioutas/Dropbox (HMS)/data_compression/data/synth_MT/sequence-as-stack-MT0.N1.HD-BP+250.tif'
 
 
 
@@ -469,7 +472,7 @@ rel_thresh = 0.45
 #%%
 #z = SPARZIP(path1, stem='guy',output_path='/Users/alioutas/Desktop/sparz_nir/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=True,align_planes=True)
 
-z = SPARZIP(path1, stem='guy',output_path='/Users/alioutas/Desktop/sparz_nir/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=False,align_planes=False)
+z = SPARZIP(path1, stem='guy_small',output_path='/Users/alioutas/Desktop/sparz_nir/', path_image_files2=path2,rel_threshold = rel_thresh, kernel_size=kernel_size,reflect_bp2=False,align_planes=False)
 
 #%%
 z.deflate_encode()
