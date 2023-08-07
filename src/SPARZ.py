@@ -1,6 +1,7 @@
 #%%
 import numpy as np
 import tifffile
+from tifffile import TiffFile
 import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
 # from skimage import imread_collection
@@ -18,6 +19,10 @@ import dask
 from dask import compute
 import gc
 from tqdm import tqdm
+import os
+import pandas as pd
+import json
+from dask import delayed
 
 
 
@@ -65,8 +70,13 @@ class SPARZIP:
             self.single_plane = True
         self.bp1, self.bp2 = self.load_images(path_image_files1, path_image_files2)
         # if self.bp1.dtype == 'float32':
-        if any(arr.dtype == np.float32 for arr in self.bp1):
-            self.bp1, self.bp2 = self.to_16bit()
+        try:
+            if any(arr.dtype == np.float32 for arr in self.bp1):
+                self.bp1, self.bp2 = self.to_16bit()
+        except TypeError:
+            dtype_first_array = self.bp1[0].compute().dtype
+            if dtype_first_array == np.float32:
+                self.bp1, self.bp2 = self.to_16bit()
         self.stem = stem
         if output_path[-1] != '/':
             self.output_path = output_path+"/"
@@ -90,20 +100,102 @@ class SPARZIP:
 
         self.processed_bp1,self.processed_bp2 = self.process_images()
 
+
+
+    # def load_images(self, path_image_files1:str, path_image_files2:str):
+    #     print ('Lazily loading images...')
+    #     # if len(glob.glob(path_image_files1)) == 1:
+    #     #     #glob the files in the folder
+    #     #     return dask_image.imread.imread(path_image_files1), dask_image.imread.imread(path_image_files2)
+    #     p1 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files1))]
+    #     if self.single_plane:
+    #         print ('Working with single plane data.')
+    #         # return da.concatenate(p1, axis=0), None
+    #         return p1, None
+    #     print('Working with biplane data.')
+    #     p2 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files2))]
+    #     # return da.concatenate(p1, axis=0), da.concatenate(p2, axis=0)
+    #     return p1,p2
+    @delayed
+    def load_dat_file(self,dat_file,dimX, dimY):
+        # Assume that the corresponding JSON file has the same name, but with .json extension
+        # json_file = os.path.splitext(dat_file)[0] + '.json'
+
+        raw_data = np.memmap(dat_file, dtype='uint16')
+        img_nums = len(raw_data) // (dimX * dimY)
+        
+        return np.reshape(raw_data, (img_nums, dimY, dimX))
+
     def load_images(self, path_image_files1:str, path_image_files2:str):
         print ('Lazily loading images...')
-        # if len(glob.glob(path_image_files1)) == 1:
-        #     #glob the files in the folder
-        #     return dask_image.imread.imread(path_image_files1), dask_image.imread.imread(path_image_files2)
-        p1 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files1))]
+        
+        files1 = sorted(glob.glob(path_image_files1))
+        multipage = False
+        ext = os.path.splitext(files1[0])[1]
+    
+        if ext == '.tiff' or ext == '.tif':
+            # Check if the first file is multipage
+            with TiffFile(files1[0]) as tif:
+                multipage = len(tif.pages) > 1
+
+            if multipage:
+                p1 = [dask_image.imread.imread(f) for f in files1]
+            else:
+                p1 = []
+                for i in range(0, len(files1), 250):
+                    images = [dask_image.imread.imread(f) for f in files1[i:i+250]]
+                    p1.append(da.concatenate(images,axis=0))
+        elif ext == '.dat':
+            dir1=os.path.dirname(files1[0])
+            json_path = os.path.join(dir1, 'data.json')
+            if not os.path.exists(json_path):
+                raise ValueError(f"data.json not found in directory: {dir1}")
+            with open(json_path, 'r') as f:
+                data_tmp = pd.DataFrame.from_dict(json.load(f))
+            dimX = data_tmp.loc['Image'].value['RecordDimX']
+            dimY = data_tmp.loc['Image'].value['RecordDimY']
+            p1 = []
+            for dat_file in files1:
+                raw_data = np.memmap(dat_file, dtype='uint16')
+                
+                img_nums = len(raw_data) // (dimX * dimY)
+                
+                p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16').rechunk((1, dimY, dimX)))
+                # p1.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
+        else:
+            raise ValueError(f'Unsupported file extension: {ext}')
+            
         if self.single_plane:
             print ('Working with single plane data.')
-            return da.concatenate(p1, axis=0), None
+            return p1, None
+            
         print('Working with biplane data.')
-        p2 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files2))]
-        # return da.concatenate(p1, axis=0), da.concatenate(p2, axis=0)
-        return p1,p2
+        files2 = sorted(glob.glob(path_image_files2))
+        
+        ext = os.path.splitext(files2[0])[1]
+        if ext == '.tiff' or ext == '.tif':
+            if multipage:
+                p2 = [dask_image.imread.imread(f) for f in files2]
+            else:
+                p2 = []
+                for i in range(0, len(files2), 250):
+                    images = [dask_image.imread.imread(f) for f in files2[i:i+250]]
+                    p2.append(da.concatenate(images,axis=0))
+        elif ext == '.dat':
+            dir1=os.path.dirname(files1[0])
+            json_path = os.path.join(dir1, 'data.json')
+            if not os.path.exists(json_path):
+                raise ValueError(f"data.json not found in directory: {dir1}")
 
+            p2 = []
+            for dat_file in files2:
+                raw_data = np.memmap(dat_file, dtype='uint16')
+                img_nums = len(raw_data) // (dimX * dimY)
+                p2.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
+            
+        else:
+            raise ValueError(f'Unsupported file extension: {ext}')
+        return p1, p2
 
     def to_16bit(self):
         print('Float32 data detected.')
@@ -248,9 +340,16 @@ class SPARZIP:
             # map_kernel = map_union.map_blocks(self.add_kernel, self.kernel_size, dtype='int16')
             map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
             # sp1 = da.where(map_kernel, self.bp1, 0)
-            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
-            # sp2 = da.where(map_kernel, self.bp2, 0)
-            sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
+            try:
+                sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+                # sp2 = da.where(map_kernel, self.bp2, 0)
+                sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
+            except TypeError:
+                def apply_where(kernel, img):
+                    return da.where(kernel, img, 0)
+                sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+                sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
+            
             print('Done.')
             # return sp1.map_blocks(sparse.COO, dtype='int16'), sp2.map_blocks(sparse.COO, dtype='int16')
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
@@ -261,7 +360,12 @@ class SPARZIP:
             return tmp
         map_mask = [b.map_blocks(lambda x: add_mask(x), dtype='int16') for b in map1]
         map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
-        sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+        try:
+            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+        except TypeError:
+            def apply_where(kernel, img):
+                return da.where(kernel, img, 0)
+            sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
         print('Done.')
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
     
@@ -274,9 +378,9 @@ class SPARZIP:
             saves = []
             for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
-                saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i].compute()))
+                saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
                 if self.single_plane == False:
-                    saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i].compute()))
+                    saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
             progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
             for i in range(0, len(saves), self.batch_size):
@@ -438,6 +542,9 @@ class SPARUNZIP:
 # path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
 # path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
 # path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# path1 = '/Users/dimos/Desktop/test/raw_bp1/*.tiff'
+# path2 = '/Users/dimos/Desktop/test/raw_bp2/*.tiff'
+# path1 = '/Users/dimos/Desktop/test/*.dat'
 # path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
 # path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
 # # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
@@ -446,31 +553,35 @@ class SPARUNZIP:
 
 #%%
 # start = time.time()
-# z = SPARZIP(path1, stem='tub',output_path='/Users/dimos/Desktop/test', path_image_files2=path2, reflect_bp2=False,align_planes=False,batch_size=50,compression_level=3)
+# z = SPARZIP(path1, stem='dat',output_path='/Users/dimos/Desktop/test', path_image_files2=None, reflect_bp2=False,align_planes=False,compression_level=0)
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
-# # #%%
-# #%%
-# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-# zz = z.get_processed_frame(start_frame=10)[0,:,:]
-#%%
-# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
 #%%
 # start = time.time()
 # z.deflate_encode()
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
+#%% 
+# start = time.time()
+# u=SPARUNZIP('/Users/dimos/Desktop/test/dat_*bp1*.npz',
+#             None,
+#             '/Users/dimos/Desktop/test/dat_*bp1*.mp4',
+#             None,
+#             output_path="/Users/dimos/Desktop/test/",stem='nir')
+# end = time.time()
+# print (end-start)
+#%%
+
+#%%
+# zz = z.get_processed_frame(start_frame=10)[0,:,:]
+#%%
+# plt.imshow(z.bp1[0].compute())
+#%%
+# da.from_delayed(z.bp1[0],(984, 492, 1108),dtype='uint16').rechunk((1,492,1108))
+# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
+
 #%%
 # start = time.time()
 # z.deflate()
 # print('Time elapsed: ', (time.time()-start)/60, ' minutes')
-#%% 
-# start = time.time()
-# u=SPARUNZIP('/Users/dimos/Desktop/test/tub_*bp1*.npz',
-#             '/Users/dimos/Desktop/test/tub_*bp2*.npz',
-#             '/Users/dimos/Desktop/test/tub_*bp1*.mp4',
-#             '/Users/dimos/Desktop/test/tub_*bp2*.mp4',
-#             output_path="/Users/dimos/Desktop/test/",stem='nir')
-# end = time.time()
-# print (end-start)
 
 #%%
 # start = time.time()
