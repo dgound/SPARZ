@@ -163,7 +163,7 @@ class SPARZIP:
                 p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16').rechunk((1, dimY, dimX)))
                 # p1.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
         else:
-            raise ValueError(f'Unsupported file extension: {ext}')
+            raise ValueError(f'Unsupported file extension: {ext}.Supported extensions are .tiff, .tif and SRX .dat')
             
         if self.single_plane:
             print ('Working with single plane data.')
