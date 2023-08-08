@@ -23,6 +23,7 @@ import os
 import pandas as pd
 import json
 from dask import delayed
+import threading
 
 
 
@@ -466,11 +467,14 @@ class SPARZIP:
 
 
 class SPARUNZIP:
-    def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str):
+    def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str, chunk_size:int=10):
+        if path_encoded_bp2 is None:
+            self.single_plane = True
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
         self.processed_bp1, self.processed_bp2 = self.process_frames()
+        self.chunk_size = chunk_size
         self.stem = stem
         if output_path[-1] != '/':
             self.output_path = output_path+"/"
@@ -480,6 +484,11 @@ class SPARUNZIP:
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
         files_bp1 = sorted(glob.glob(sparse_bp1))
+        if self.single_plane:
+            bp1 = []
+            for i in range(len(files_bp1)):
+                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            return bp1, None
         files_bp2 = sorted(glob.glob(sparse_bp2))
         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
         bp1,bp2 = [],[]
@@ -494,8 +503,14 @@ class SPARUNZIP:
     def decode(self, path_bp1:str, path_bp2:str):
         print('Decoding images...')
         files_bp1 = sorted(glob.glob(path_bp1))
+        if self.single_plane:
+            bp1 = []
+            for i in range(len(files_bp1)):
+                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+            return bp1, None
         files_bp2 = sorted(glob.glob(path_bp2))
         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+    
         bp1, bp2 = [], []
         for i in range(len(files_bp1)):
             bp1.append(vimread(files_bp1[i], dtypes='uint16'))
@@ -505,6 +520,8 @@ class SPARUNZIP:
     
     def process_frames(self):
         print('Lazily Processing images...')
+        if self.single_plane:
+            return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
         return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
 
     # def save_file(self,arr, block_info=None):
@@ -512,28 +529,60 @@ class SPARUNZIP:
     #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
     #     tifffile.imwrite(filename, arr, photometric='minisblack')
     #     return arr
+    def write_chunk(self, chunk, filename):
+        tif_writer_lock = threading.Lock()
+        with tif_writer_lock:
+            with tifffile.TiffWriter(filename, bigtiff=True) as tif:
+                for frame in chunk:
+                    tif.write(frame, photometric='minisblack')
 
     def inflate(self):
         print('Inflating images...')
-        for k in range(len(self.encoded_bp1)):
-            num_frames = self.encoded_bp1[k].shape[0]
+        if self.single_plane:
+            chunk_tasks = []
+            for k in range(len(self.encoded_bp1)):
+                num_frames = self.encoded_bp1[k].shape[0]
 
-            chunk_size = 10  # Adjust this to a suitable size for your data and memory
+                chunk_size = self.chunk_size  # Adjust this to a suitable size for your data and memory
 
-            filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
-            filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                filename1 = f'{self.output_path}{self.stem}_part_{k}.tiff'
 
-            with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
                 for i in range(0, num_frames, chunk_size):
-                    chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
-                    for frame in chunk:
-                        tif.write(frame, photometric='minisblack')
+                    chunk = self.encoded_bp1[k][i:i+chunk_size]
+                    chunk_task = dask.delayed(self.write_chunk)(chunk,filename1)
+                    chunk_tasks.append(chunk_task)
 
-            with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-                for i in range(0, num_frames, chunk_size):
-                    chunk = self.encoded_bp2[k][i:i+chunk_size].compute()  # Compute a chunk of frames
-                    for frame in chunk:
-                        tif.write(frame, photometric='minisblack')
+            # Compute and execute the delayed tasks in parallel
+            dask.compute(*chunk_tasks, scheduler='threads')  # Use 'processes' for multiprocessing
+
+            # Wait for all computations to finish
+            dask.config.set(scheduler='sync')  # Restore synchronous scheduler
+
+                # with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                #     for i in range(0, num_frames, chunk_size):
+                #         chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                #         for frame in chunk:
+                #             tif.write(frame, photometric='minisblack')
+        else:
+            for k in range(len(self.encoded_bp1)):
+                num_frames = self.encoded_bp1[k].shape[0]
+
+                chunk_size = self.chunk_size  # Adjust this to a suitable size for your data and memory
+
+                filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+
+                with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                    for i in range(0, num_frames, chunk_size):
+                        chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                        for frame in chunk:
+                            tif.write(frame, photometric='minisblack')
+
+                with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                    for i in range(0, num_frames, chunk_size):
+                        chunk = self.encoded_bp2[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                        for frame in chunk:
+                            tif.write(frame, photometric='minisblack')
 
 
 
@@ -560,17 +609,20 @@ class SPARUNZIP:
 # z.deflate_encode()
 # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
 #%% 
-# start = time.time()
 # u=SPARUNZIP('/Users/dimos/Desktop/test/dat_*bp1*.npz',
 #             None,
 #             '/Users/dimos/Desktop/test/dat_*bp1*.mp4',
 #             None,
-#             output_path="/Users/dimos/Desktop/test/",stem='nir')
+#             output_path="/Users/dimos/Desktop/test/",stem='nir',
+#             chunk_size=100)
+# #%%
+# start = time.time()
+# u.inflate()
 # end = time.time()
 # print (end-start)
-#%%
+# #%%
+# da.where(u.sparse_bp1[1]!=0,u.encoded_bp1[1],u.sparse_bp1[1]).compute()
 
-#%%
 # zz = z.get_processed_frame(start_frame=10)[0,:,:]
 #%%
 # plt.imshow(z.bp1[0].compute())
