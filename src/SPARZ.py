@@ -451,9 +451,11 @@ class SPARZIP:
                 all_writers.append(writer2)
 
         progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
-        for write in all_writes:
-            write.compute()
-            progress_bar.update(1)
+        for write in range(0, len(all_writes), self.batch_size):
+            batch = all_writes[write:write+self.batch_size]
+            # write.compute()
+            dask.compute(*batch)
+            progress_bar.update(self.batch_size)
         progress_bar.close()
 
         # Close all writers
