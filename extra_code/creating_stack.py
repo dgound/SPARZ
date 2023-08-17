@@ -11,8 +11,8 @@ import tifffile
 #%%
 
 # Define input and output folders
-input_folder = '/Users/laurabreimann/Desktop/Guys_data/ffv1/fused_biplane/'
-output_stack_folder = '/Users/laurabreimann/Desktop/Guys_data/ffv1/'
+input_folder = '/Users/laurabreimann/Desktop/simulated_tubulin_data/sparz/uncompressed/fused_biplane/'
+output_stack_folder = '/Users/laurabreimann/Desktop/simulated_tubulin_data/sparz/uncompressed/'
 
 # Create the output folder for the stack
 os.makedirs(output_stack_folder, exist_ok=True)
@@ -20,8 +20,8 @@ os.makedirs(output_stack_folder, exist_ok=True)
 
 # %%
 
-# Get the list of image files in the input folder
-image_files = sorted(os.listdir(input_folder))
+# Get the list of image files in the input folder, excluding .DS_Store
+image_files = sorted(file for file in os.listdir(input_folder) if not file.startswith('.DS_Store'))
 
 # Load all images and store in a list
 images = []
@@ -29,7 +29,7 @@ for image_file in image_files:
     image_path = os.path.join(input_folder, image_file)
     image = imageio.imread(image_path)
     images.append(image)
-
+    
 # Convert the list of images to a NumPy array
 images = np.array(images, dtype=np.uint16)
 
