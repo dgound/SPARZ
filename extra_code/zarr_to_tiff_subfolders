@@ -1,0 +1,47 @@
+#%%
+import os
+import zarr
+import numpy as np
+import imageio
+
+#%%
+
+# Specify the directory containing the subfolders with zarr datasets
+base_directory = '/Users/laurabreimann/Library/CloudStorage/Dropbox-HMS/zarr_bp1'
+
+#%%
+
+# Get a list of subfolder names (img_X_X_bp1.zarr)
+subfolder_names = [name for name in os.listdir(base_directory) if name.endswith('_bp1.zarr')]
+
+# Specify the desired output folder
+output_folder = '/Users/laurabreimann/Desktop/Guys_data/zarr/biplane_images/bp1'
+os.makedirs(output_folder, exist_ok=True)
+
+
+#%%
+
+# Inside the loop that iterates over subfolder_names
+for subfolder_name in subfolder_names:
+    subfolder_path = os.path.join(base_directory, subfolder_name)
+
+    # Open the zarr dataset inside the subfolder
+    raw_data_bp1 = zarr.open(subfolder_path, mode='r')
+
+    # Assuming the dataset has only one dimension
+    num_slices = raw_data_bp1.shape[0]
+
+    # Iterate over each slice and save the images
+    for idx in range(num_slices):
+        image = raw_data_bp1[idx, :, :]
+
+        # Convert to 16-bit and scale the values
+        image_16bit = (image / np.max(image) * (2**16 - 1)).astype(np.uint16)
+
+        # Save the image as a TIFF file using imageio
+        output_filename = os.path.join(output_folder, f'image_{idx}_{subfolder_name[:-11]}.tiff')
+        imageio.imwrite(output_filename, image_16bit, format='TIFF')
+
+print(f"Images saved to '{output_folder}' folder.")
+
+# %%
