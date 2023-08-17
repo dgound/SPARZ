@@ -5,3 +5,4 @@ src/__pycache__/reader.cpython-39.pyc
 .gitignore
 src/__pycache__/reader.cpython-310.pyc
 .DS_Store
+.DS_Store
