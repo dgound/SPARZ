@@ -108,16 +108,17 @@ plt.savefig(os.path.join(os.getcwd()+ '/output/', data_name+ '_kdeplot.png'), dp
 # %%
 # plot the boxplot of df
 import seaborn as sns
+import matplotlib.pyplot as plt
+
 sns.set_theme(style="whitegrid")
 ax = sns.boxplot(x="codec", y="distance", data=df_out)
 ax.set(yscale="log")
 ax.set_ylabel('Distance (log)')
 plt.axhline(y=40, color='r', linestyle='--', linewidth=2)
-plt.show()
 
 #save plot
 plt.savefig(os.path.join(os.getcwd()+ '/output/', data_name+ '_boxplot.png'), dpi=300)
-
+plt.show()
 # %%
 
 # %%
