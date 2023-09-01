@@ -2,9 +2,61 @@
 import pandas as pd
 from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
+import numpy as np
+from h5r_functions import h5r_to_df
+from concurrent.futures import ProcessPoolExecutor
+from scipy.spatial import distance
 
 #%%
-from h5r_functions import h5r_to_df
+import multiprocessing
+num_cores = multiprocessing.cpu_count()
+num_cores = int(round(num_cores * 0.6, 0))
+
+print(num_cores)
+
+#%%
+from joblib import Parallel, delayed
+
+def compute_single_row(row, gt, n_neighbors):
+    distances = np.array([distance.euclidean(row, gt_row) for gt_row in gt.values])
+    sorted_indices = np.argsort(distances)
+    return distances[sorted_indices[:n_neighbors]], sorted_indices[:n_neighbors]
+
+
+def compute_nearest_neighbours_parallel(df, gt, n_neighbors=1, n_jobs=-1):
+    # Initialize arrays to hold the results
+    min_distances = np.zeros((df.shape[0], n_neighbors))
+    min_indices = np.zeros((df.shape[0], n_neighbors), dtype=int)
+
+    # Compute the minimum distances and indices for each row in df
+    results = Parallel(n_jobs=n_jobs)(delayed(compute_single_row)(row, gt, n_neighbors) for _, row in df.iterrows())
+
+    # Assign the results to the arrays
+    for i, (distances, indices) in enumerate(results):
+        min_distances[i] = distances
+        min_indices[i] = indices
+
+    return min_distances, min_indices
+
+
+
+
+
+# %%
+# Function to compute the n_neighbors nearest neighbours between two dataframes
+def compute_nearest_neighbours(df, gt, n_neighbors=1):
+    # Initialize arrays to hold the results
+    min_distances = np.zeros((df.shape[0], n_neighbors))
+    min_indices = np.zeros((df.shape[0], n_neighbors), dtype=int)
+    
+    # Compute the minimum distances and indices for each row in df
+    for i, row in df.iterrows():
+        distances = np.array([distance.euclidean(row, gt_row) for gt_row in gt.values])
+        sorted_indices = np.argsort(distances)
+        min_distances[i] = distances[sorted_indices[:n_neighbors]]
+        min_indices[i] = sorted_indices[:n_neighbors]
+    
+    return min_distances, min_indices
 
 #%%
 #Import localizations from h5r file
@@ -36,8 +88,16 @@ ground_truth.columns = ["id", "frame", "fitResults_x0", "fitResults_y0", "fitRes
 ground_truth
 # %%
 # calculate nearest neighbours between the localizations and the ground truth
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+#%%
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 #%%
 # # plot localizations from function filtered
@@ -90,9 +150,14 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 ffv1_dist_gt = distances
 
 locs['nn_distance'] = distances
@@ -109,8 +174,15 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 ffv1_dist_raw = distances
 
@@ -128,10 +200,43 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 H264_dist_gt = distances
+
+locs['nn_distance'] = distances
+plt.scatter(locs["fitResults_x0"], locs["fitResults_y0"], s=1, c = locs["nn_distance"])
+plt.colorbar()
+plt.show()
+
+# %%
+# X264 vs Raw
+ground_truth = h5r_to_df(filepath='/Users/alioutas/Desktop/Desktop/sequence-MT0.N1.HD-BP_raw.h5r')
+
+filepath = '/Users/alioutas/Desktop/Desktop/sequence-MT0.N1.HD-BP_h264.h5r'
+locs = h5r_to_df(filepath=filepath)
+
+locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
+
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
+
+H264_dist_raw = distances
 
 locs['nn_distance'] = distances
 plt.scatter(locs["fitResults_x0"], locs["fitResults_y0"], s=1, c = locs["nn_distance"])
@@ -147,8 +252,15 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 X265_dist_raw = distances
 
@@ -167,8 +279,15 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 X265_dist_gt = distances
 
@@ -186,8 +305,15 @@ locs = h5r_to_df(filepath=filepath)
 
 locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < 100000)]
 
-nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
-distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# nbrs = NearestNeighbors(n_neighbors=1, algorithm='ball_tree').fit(ground_truth[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+# distances, indices = nbrs.kneighbors(locs[["fitResults_x0", "fitResults_y0", "fitResults_z0"]])
+
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+df_query = locs.reset_index()[col_select]
+gt = ground_truth.reset_index()[col_select]
+n_neighbors = 1
+# distances, indices = compute_nearest_neighbours(df_query, gt, n_neighbors)
+distances, indices = compute_nearest_neighbours_parallel(df_query, gt, n_neighbors=1, n_jobs=num_cores)
 
 X265_dist_raw = distances
 
@@ -208,14 +334,14 @@ X265_dist_raw['codec'] = 'X265'
 H264_dist_raw = pd.DataFrame(H264_dist_raw)
 H264_dist_raw['codec'] = 'H264'
 
-df = pd.concat([ffv1_dist_raw, X265_dist_raw, H264_dist_raw])
-df.columns = ['distances', 'codec']
+df_raw = pd.concat([ffv1_dist_raw, X265_dist_raw, H264_dist_raw])
+df_raw.columns = ['distances', 'codec']
 
 #%%
 # plot the boxplot of df
 import seaborn as sns
 sns.set_theme(style="whitegrid")
-ax = sns.boxplot(x="codec", y="distances", data=df)
+ax = sns.boxplot(x="codec", y="distances", data=df_raw)
 ax.set(yscale="log")
 ax.set_ylabel('Distance (log)')
 
@@ -230,14 +356,20 @@ X265_dist_gt['codec'] = 'X265'
 H264_dist_gt = pd.DataFrame(H264_dist_gt)
 H264_dist_gt['codec'] = 'H264'
 
-df = pd.concat([ffv1_dist_gt, X265_dist_gt, H264_dist_gt])
-df.columns = ['distances', 'codec']
+df_gt = pd.concat([ffv1_dist_gt, X265_dist_gt, H264_dist_gt])
+df_gt.columns = ['distances', 'codec']
 
 #%%
-# plot the boxplot of df
+# plot histograms of df
 import seaborn as sns
 sns.set_theme(style="whitegrid")
-ax = sns.boxplot(x="codec", y="distances", data=df)
+
+
+#%%
+# plot the bocplots of df
+import seaborn as sns
+sns.set_theme(style="whitegrid")
+ax = sns.boxplot(x="codec", y="distances", data=df_gt)
 #ax.set(yscale="log")
 ax.set_ylabel('Distance from GT')
 
@@ -245,3 +377,17 @@ plt.show()
 
 
 # %%
+# Plot histograms of the distances
+import seaborn as sns
+sns.kdeplot(data=df_raw, hue="codec", bw_adjust=.1, x="distances", color ="codec" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=True)
+
+
+# %%
+
+plt.hist(min_distances, bins=100, log=True)
+plt.show()
+# %%
+sns.kdeplot(data=df, hue = 'codec', bw_adjust=.1, fill=False, common_norm=True, alpha=.8, linewidth=2, log_scale=True)
+
+# %%
+data = []
