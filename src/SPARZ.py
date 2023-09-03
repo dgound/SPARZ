@@ -2,7 +2,7 @@
 import numpy as np
 import tifffile
 from tifffile import TiffFile
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
 # from skimage import imread_collection
 import glob
@@ -13,7 +13,7 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-from skvideo.io import FFmpegWriter
+# from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
 from dask import compute
@@ -25,9 +25,9 @@ import json
 from dask import delayed
 import threading
 import ffmpeg
-import multiprocessing
-from multiprocessing import Pool
-from numba import njit
+from dask.diagnostics import ProgressBar
+import concurrent.futures
+import av
 
 
 #%%
@@ -632,20 +632,7 @@ class SPARUNZIP:
                 break
             if dtype is not None:
                 break
-        # print ('first',first_frame.shape)
-        # Determine the chunk size based on the number of frames
-        # You can adjust this threshold as needed
-        # chunk_size = max(1, frame_count // 100)  # For example, set to 1% of frames
 
-        # Create a delayed function to read frames
-        # def read_frame(i):
-        #     container = av.open(file_path)
-        #     container.streams.video[0].seek(i)
-        #     for packet in container.demux():
-        #         for frame in packet.decode():
-        #             if frame.index == i:
-        #                 return frame.to_ndarray(format='gray16le')
-        #     return np.zeros_like(first_frame, dtype=dtype)
         def read_frame(i):
             container = av.open(file_path)
             video_stream = container.streams.video[0]
@@ -662,52 +649,10 @@ class SPARUNZIP:
         frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
 
         # Concatenate frame arrays into a single Dask array
-        # video_array = da.concatenate(frame_arrays, axis=0)
         video_array = da.stack(frame_arrays, axis=0)
-        # print('vv',video_array.shape)
+
         return video_array
     
-    # def load_mp4(self,file_path):
-    #     # Specify the four character code for HEVC
-    #     fourcc = cv2.VideoWriter_fourcc('H', 'E', 'V', 'C')
-
-    #     # Create a VideoCapture object with the HEVC codec
-    #     cap = cv2.VideoCapture(file_path)
-    #     cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-    #     cap.set(cv2.CAP_PROP_CUDA_DEVICE, 0)
-    #     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    #     dtype = None
-
-    #     # Read the first frame to infer dtype
-    #     ret, first_frame = cap.read()
-    #     if not ret:
-    #         raise ValueError("Unable to read the first frame of the video")
-        
-    #     dtype = first_frame.dtype
-
-    #     # Determine the chunk size based on the number of frames
-    #     # You can adjust this threshold as needed
-    #     chunk_size = max(1, frame_count // 100)  # For example, set to 1% of frames
-
-    #     # Create a delayed function to read frames
-    #     def read_frame(i):
-    #         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-    #         ret, frame = cap.read()
-    #         if ret:
-    #             return frame
-    #         else:
-    #             return np.zeros_like(frame, dtype=dtype)
-
-    #     # Create a Dask array for each frame
-    #     frames = [da.from_delayed(delayed(read_frame)(i), shape=first_frame.shape, dtype=dtype) for i in range(frame_count)]
-
-    #     # Stack frames into a Dask array
-    #     video_array = da.stack(frames, axis=0)
-
-    #     # Rechunk the Dask array
-    #     # video_array = video_array.rechunk((chunk_size, *first_frame.shape))
-
-    #     return video_array
 
     def load_sparse(self, sparse_bp1: str, sparse_bp2: str, shapes: tuple):
         print('Loading sparse matrices...')
@@ -737,19 +682,7 @@ class SPARUNZIP:
             bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
             bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
         return bp1,bp2
-    # def decode(self, path_bp1: str, path_bp2: str):
-    #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-    #     if self.single_plane:
-    #         with concurrent.futures.ThreadPoolExecutor() as executor:
-    #             bp1 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-    #         return bp1, None
-    #     files_bp2 = sorted(glob.glob(path_bp2))
-    #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #     with concurrent.futures.ThreadPoolExecutor() as executor:
-    #         bp1 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-    #         bp2 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp2))
-    #     return bp1, bp2
+
 
     def process_frames(self):
         print('Lazily Processing images...')
