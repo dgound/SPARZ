@@ -1,71 +1,61 @@
-#%%
-
-#import relevant packages 
 import os
 import numpy as np
 import imageio
-from tifffile import imsave
 import tifffile
 
-
-#%%
-
-# Define input and output folders
-input_folder = '/Users/laurabreimann/Desktop/simulated_tubulin_data/sparz/uncompressed/fused_biplane/'
-output_stack_folder = '/Users/laurabreimann/Desktop/simulated_tubulin_data/sparz/uncompressed/'
-
-# Create the output folder for the stack
-os.makedirs(output_stack_folder, exist_ok=True)
-
-
-# %%
-
-# Get the list of image files in the input folder, excluding .DS_Store
-image_files = sorted(file for file in os.listdir(input_folder) if not file.startswith('.DS_Store'))
-
-# Load all images and store in a list
-images = []
-for image_file in image_files:
-    image_path = os.path.join(input_folder, image_file)
-    image = imageio.imread(image_path)
-    images.append(image)
+def load_images_from_folder(input_folder):
+    """
+    Load all images from the specified folder.
     
-# Convert the list of images to a NumPy array
-images = np.array(images, dtype=np.uint16)
+    Args:
+    - input_folder (str): Path to the folder containing the images.
+    
+    Returns:
+    - np.array: Array containing all the loaded images.
+    """
+    # Exclude system files and load image files
+    image_files = sorted(file for file in os.listdir(input_folder) if not file.startswith('.'))
+    
+    images = [imageio.imread(os.path.join(input_folder, img_file)) for img_file in image_files]
+    
+    return np.array(images, dtype=np.uint16)
 
+def convert_images_to_stack(images):
+    """
+    Convert a list of images into a single TIFF stack with shape (T, Z, C, Y, X).
+    
+    Args:
+    - images (np.array): Array containing the loaded images.
+    
+    Returns:
+    - np.array: 5D TIFF stack.
+    """
+    T, Y, X = len(images), *images[0].shape
+    stack_shape = (T, 1, 1, Y, X, 1)  # Single channel, single Z value
+    stack = np.zeros(stack_shape, dtype=images.dtype)
 
-# Get the dimensions of the images
-Y, X = images[0].shape  # Assuming all images have the same dimensions
-C = 1  # Assuming single channel images
+    for i, image in enumerate(images):
+        stack[i, 0, 0, :, :, 0] = image
+        
+    return stack
 
-# Get the number of images (time frames)
-T = len(image_files)
+if __name__ == '__main__':
+    # Define paths
+    input_folder = '/path/to/your/input_folder'
+    output_folder = '/path/to/your/output_folder'
+    output_filename = 'output_file_name.tif'
+    
+    # Ensure output folder exists
+    os.makedirs(output_folder, exist_ok=True)
 
-# Assuming Z is 1 
-Z_values = 1  # Choose the appropriate Z value based on your needs
-
-# Create an array with the correct shape
-stack_shape = (T, Z_values, 1, Y, X, C)  # Add a singleton Z dimension
-stack = np.zeros(stack_shape, dtype=images.dtype)
-
-# Populate the stack with the image data
-for i, image in enumerate(images):
-    stack[i, 0, 0, :, :, 0] = image
-
-# Save the stack as a TIFF file
-output_tiff_path = os.path.join(output_stack_folder, "Nir_et_al.tif")
-metadata = {
-    'axes': 'TZCYXS',  # Reorder axes to TZCYXS
-    'shape': stack_shape,
-}
-tifffile.imsave(output_tiff_path, stack, dtype=np.uint16, bigtiff=True, imagej=True, metadata=metadata)
-
-print(f"TIFF stack saved as '{output_tiff_path}'.")
-
-
-# %%
-# Print the dimensions
-print("Stack dimensions:", stack.shape)
-
-
-# %%
+    # Load images and convert to a single TIFF stack
+    images = load_images_from_folder(input_folder)
+    stack = convert_images_to_stack(images)
+    
+    # Save the stack as a TIFF
+    output_tiff_path = os.path.join(output_folder, output_filename)
+    metadata = {'axes': 'TZCYXS', 'shape': stack.shape}
+    tifffile.imsave(output_tiff_path, stack, dtype=np.uint16, bigtiff=True, imagej=True, metadata=metadata)
+    
+    print(f"TIFF stack saved as '{output_tiff_path}'.")
+    print("Stack dimensions:", stack.shape)
