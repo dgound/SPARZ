@@ -44,9 +44,9 @@ def h5r_to_df(filepath):
                     df_slices_used_x, df_slices_used_y, df_slices_used_x2, df_slices_used_y2], axis=1)
 
 
-    for column in df.columns:
-        column_type = df[column].apply(type).iloc[0]
-        print(f"Column '{column}' has type: {column_type}")
+    # for column in df.columns:
+    #     column_type = df[column].apply(type).iloc[0]
+        # print(f"Column '{column}' has type: {column_type}")
 
     # Convert the 'fitResults', 'fitError', and 'startParams' columns to strings
     df['fitResults'] = df['fitResults'].astype(str)
@@ -55,9 +55,9 @@ def h5r_to_df(filepath):
     df['slicesUsed'] = df['startParams'].astype(str)
     df['subtractedBackground'] = df['startParams'].astype(str)
 
-    for column in df.columns:
-        column_type = df[column].apply(type).iloc[0]
-        print(f"Column '{column}' has type: {column_type}")
+    # for column in df.columns:
+    #     column_type = df[column].apply(type).iloc[0]
+        # print(f"Column '{column}' has type: {column_type}")
 
     df = df.drop(columns=['fitResults', 'fitError', 'startParams', 'slicesUsed'])
 
