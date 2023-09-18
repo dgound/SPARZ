@@ -13,7 +13,7 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-from skvideo.io import FFmpegWriter
+# from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
 from dask import compute
