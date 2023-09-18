@@ -469,7 +469,7 @@ class SPARZIP:
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=True)
 
-    def run(self,compression_level:int=0,find_peaks:bool=True):
+    def run(self,compression_level:int=0):#,find_peaks:bool=True):
         if self.find_roi:
             self.deflate()
             gc.collect()
