@@ -2,6 +2,7 @@ import os
 import numpy as np
 import imageio
 import tifffile
+from natsort import natsorted
 
 def get_all_slices_from_folder(input_folder):
     """
@@ -14,7 +15,8 @@ def get_all_slices_from_folder(input_folder):
     - np.array: Concatenated 2D slices from all stacks.
     """
     # Get the list of image files in the input folder, excluding system files
-    stack_files = sorted(file for file in os.listdir(input_folder) if not file.startswith('.'))
+    stack_files = natsorted(file for file in os.listdir(input_folder) if not file.startswith('.'))
+    print(stack_files)
     
     all_slices = []
     for stack_file in stack_files:
@@ -22,7 +24,7 @@ def get_all_slices_from_folder(input_folder):
         stack = imageio.volread(stack_path)
         all_slices.extend(stack)
         
-    return np.array(all_slices, dtype=np.uint16)
+    return np.array(all_slices, ) #remove dtype dtype=np.uint16
 
 def save_stack_as_tiff(stack, output_path):
     """
@@ -40,8 +42,8 @@ def save_stack_as_tiff(stack, output_path):
 
 if __name__ == '__main__':
     # Define input and output folders
-    input_folder = '/Users/laurabreimann/Desktop/SMLM_compress/level_0/biplane'
-    output_folder = '/Users/laurabreimann/Desktop/SMLM_compress/level_0/'
+    input_folder = '/Users/laurabreimann/Desktop/input_data/nir_etal_ROI/level_3_kernel_11_relThres_55/biplane'
+    output_folder = '/Users/laurabreimann/Desktop/input_data/nir_etal_ROI/level_3_kernel_11_relThres_55'
     output_filename = 'Nir_et_al.tif'
     
     # Ensure the output folder exists
