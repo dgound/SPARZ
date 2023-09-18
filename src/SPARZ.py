@@ -27,12 +27,7 @@ from dask import delayed
 import ffmpeg
 from dask.diagnostics import ProgressBar
 import concurrent.futures
-# import cv2
 import av
-# import multiprocessing
-# from multiprocessing import Pool
-# from numba import njit
-# import cupy as cp
 
 #%%
 class SPARZIP:
@@ -456,16 +451,6 @@ class SPARZIP:
         # Prepare output directories
         os.makedirs(os.path.dirname(video_name), exist_ok=True)
 
-        # Write frames to a video using ffmpeg-python
-        # if bp2_frames is not None:
-        #     input_frames = np.concatenate((bp1_frames, bp2_frames), axis=-1)
-        # else:
-        #     input_frames = bp1_frames
-
-        # Convert the frames to the correct format for ffmpeg
-        # input_frames = np.moveaxis(input_frames, -3, -1)
-        # print (input_frames.shape)
-        # Create a ffmpeg input from the frames
         input_dict = {
             'format': 'rawvideo',
             'pix_fmt': 'gray16le',
@@ -523,42 +508,6 @@ class SPARUNZIP:
         else:
             self.output_path = output_path
 
-    # def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
-    #     print ('Loading sparse matrices...')
-    #     files_bp1 = sorted(glob.glob(sparse_bp1))
-    #     if self.single_plane:
-    #         bp1 = [da.from_array(sparse.load_npz(file), chunks=(1,shapes[i][1],shapes[i][2])) for i, file in enumerate(files_bp1)]
-    #         # bp1 = []
-    #         # for i in range(len(files_bp1)):
-    #             # bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-    #         return bp1, None
-    #     files_bp2 = sorted(glob.glob(sparse_bp2))
-    #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #     bp1 = [da.from_array(sparse.load_npz(file), chunks=(1,shapes[i][1],shapes[i][2])) for i, file in enumerate(files_bp1)]
-    #     bp2 = [da.from_array(sparse.load_npz(file), chunks=(1,shapes[i][1],shapes[i][2])) for i, file in enumerate(files_bp2)]
-
-    #     return bp1, bp2
-    
-    # def decode(self, path_bp1:str, path_bp2:str):
-    #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-    #     if self.single_plane:
-    #         bp1 = list(map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-
-    #         return bp1, None
-    #     files_bp2 = sorted(glob.glob(path_bp2))
-    #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #     bp1 = list(map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-    #     bp2 = list(map(lambda file: vimread(file, dtypes='uint16'), files_bp2))    
-
-    #     return bp1, bp2
-    
-    # def process_frames(self):
-    #     print('Lazily Processing images...')
-    #     if self.single_plane:
-    #         return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
-    #     return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
-
 
     def load_mp4(self, file_path):
         container = av.open(file_path)
@@ -573,26 +522,7 @@ class SPARUNZIP:
                 break
             if dtype is not None:
                 break
-        # print ('first',first_frame.shape)
-        # Determine the chunk size based on the number of frames
-        # You can adjust this threshold as needed
-        # chunk_size = max(1, frame_count // 100)  # For example, set to 1% of frames
 
-        # Create a delayed function to read frames
-        # def read_frame(i):
-        #     container = av.open(file_path)
-        #     video_stream = container.streams.video[0]
-        #     for packet in container.demux(video_stream):
-        #         if packet.dts is not None:
-        #             container.seek(packet.dts, any_stream=video_stream, backward=True)
-        #             break
-        #     while True:
-        #         for frame in container.decode(video_stream):
-        #             if frame.pts is not None and frame.pts >= i:
-        #                 return frame.to_ndarray(format='gray16le')
-        #         if packet.is_eof():
-        #             break
-        #     return np.zeros_like(first_frame, dtype=dtype)
         def frame_generator(file_path):
             container = av.open(file_path)
             video_stream = container.streams.video[0]
@@ -605,15 +535,6 @@ class SPARUNZIP:
                 if index == i:
                     return frame.to_ndarray(format='gray16le')
             
-            # container = av.open(file_path)
-            # video_stream = container.streams.video[0]
-            # for packet in container.demux(video_stream):
-                # for frame in packet.decode():
-                    # if frame.index == i:
-                        # return frame.to_ndarray(format='gray16le')
-            # return np.zeros_like(first_frame, dtype=dtype)
-
-        # Create a list of delayed objects for each frame
         frames = [delayed(read_frame)(i) for i in range(frame_count)]
 
         # Create Dask arrays for each frame
@@ -624,48 +545,7 @@ class SPARUNZIP:
         video_array = da.stack(frame_arrays, axis=0)
         # print('vv',video_array.shape)
         return video_array
-    
-    # def load_mp4(self,file_path):
-    #     # Specify the four character code for HEVC
-    #     fourcc = cv2.VideoWriter_fourcc('H', 'E', 'V', 'C')
 
-    #     # Create a VideoCapture object with the HEVC codec
-    #     cap = cv2.VideoCapture(file_path)
-    #     cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-    #     cap.set(cv2.CAP_PROP_CUDA_DEVICE, 0)
-    #     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    #     dtype = None
-
-    #     # Read the first frame to infer dtype
-    #     ret, first_frame = cap.read()
-    #     if not ret:
-    #         raise ValueError("Unable to read the first frame of the video")
-        
-    #     dtype = first_frame.dtype
-
-    #     # Determine the chunk size based on the number of frames
-    #     # You can adjust this threshold as needed
-    #     chunk_size = max(1, frame_count // 100)  # For example, set to 1% of frames
-
-    #     # Create a delayed function to read frames
-    #     def read_frame(i):
-    #         cap.set(cv2.CAP_PROP_POS_FRAMES, i)
-    #         ret, frame = cap.read()
-    #         if ret:
-    #             return frame
-    #         else:
-    #             return np.zeros_like(frame, dtype=dtype)
-
-    #     # Create a Dask array for each frame
-    #     frames = [da.from_delayed(delayed(read_frame)(i), shape=first_frame.shape, dtype=dtype) for i in range(frame_count)]
-
-    #     # Stack frames into a Dask array
-    #     video_array = da.stack(frames, axis=0)
-
-    #     # Rechunk the Dask array
-    #     # video_array = video_array.rechunk((chunk_size, *first_frame.shape))
-
-    #     return video_array
 
     def load_sparse(self, sparse_bp1: str, sparse_bp2: str, shapes: tuple):
         print('Loading sparse matrices...')
@@ -700,19 +580,7 @@ class SPARUNZIP:
             bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
             bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
         return bp1, bp2
-    # def decode(self, path_bp1: str, path_bp2: str):
-    #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-    #     if self.single_plane:
-    #         with concurrent.futures.ThreadPoolExecutor() as executor:
-    #             bp1 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-    #         return bp1, None
-    #     files_bp2 = sorted(glob.glob(path_bp2))
-    #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #     with concurrent.futures.ThreadPoolExecutor() as executor:
-    #         bp1 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp1))
-    #         bp2 = list(executor.map(lambda file: vimread(file, dtypes='uint16'), files_bp2))
-    #     return bp1, bp2
+
 
     def process_frames(self):
         print('Lazily Processing images...')
@@ -785,150 +653,3 @@ class SPARUNZIP:
 
                 progress_bar.update(self.chunk_size)
             progress_bar.close()
-
-# class SPARUNZIP:
-#     def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str, chunk_size:int=10):
-#         self.single_plane = path_encoded_bp2 is None
-#         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
-#         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
-#         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
-#         self.processed_bp1, self.processed_bp2 = self.process_frames()
-#         self.chunk_size = chunk_size
-#         self.stem = stem
-#         self.output_path = os.path.join(output_path, '')
-
-#     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
-#         print ('Loading sparse matrices...')
-#         files_bp1 = sorted(glob.glob(sparse_bp1))
-#         if self.single_plane:
-#             bp1 = []
-#             for i in range(len(files_bp1)):
-#                 bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-#             return bp1, None
-#         files_bp2 = sorted(glob.glob(sparse_bp2))
-#         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-#         bp1,bp2 = [],[]
-#         for i in range(len(files_bp1)):
-#             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-#             bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-#             # bp1 = da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[1],shapes[2]))
-#             # bp2 = da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[1],shapes[2]))
-#         return bp1, bp2
-#         # return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
-    
-#     def decode(self, path_bp1:str, path_bp2:str):
-#         print('Decoding images...')
-#         files_bp1 = sorted(glob.glob(path_bp1))
-#         if self.single_plane:
-#             bp1 = []
-#             for i in range(len(files_bp1)):
-#                 bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-#             print (bp1[0].shape)
-#             return bp1, None
-#         files_bp2 = sorted(glob.glob(path_bp2))
-#         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    
-#         bp1, bp2 = [], []
-#         for i in range(len(files_bp1)):
-#             bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-#             bp2.append(vimread(files_bp2[i], dtypes='uint16'))
-#         print (bp1.shape)
-#         return bp1, bp2
-#         # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
-    
-#     def process_frames(self):
-#         print('Lazily Processing images...')
-#         if self.single_plane:
-#             return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
-#         return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
-
-#     # def save_file(self,arr, block_info=None):
-#     #     """ Save file to foo-x-y.tif, where x and y are block locations """
-#     #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
-#     #     tifffile.imwrite(filename, arr, photometric='minisblack')
-#     #     return arr
-
-#     def write_chunk(self, args):
-#         chunk, filename = args
-#         with tifffile.TiffWriter(filename, bigtiff=True) as tif:
-#             for frame in chunk:
-#                 tif.write(frame, photometric='minisblack')
-
-#     def inflate(self):
-#         print('Inflating images...')
-#         chunk_tasks = []
-#         for k in range(len(self.encoded_bp1)):
-#             num_frames = self.encoded_bp1[k].shape[0]
-#             filename1 = f'{self.output_path}{self.stem}_part_{k}.tiff'
-#             for i in range(0, num_frames, self.chunk_size):
-#                 chunk = self.encoded_bp1[k][i:i+self.chunk_size]
-#                 chunk_tasks.append((chunk, filename1))
-
-#         with Pool(multiprocessing.cpu_count()) as p:
-#             p.map(self.write_chunk, chunk_tasks)
-
-#%%
-if __name__ == '__main__':
-# path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
-# path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
-# path1 = '/Users/dimos/Desktop/test/raw_bp1/*.tiff'
-# path2 = '/Users/dimos/Desktop/test/raw_bp2/*.tiff'
-    path1 = '/Users/dimos/Desktop/test/*.dat'
-# path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
-# path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
-# # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
-# kernel_size = 9     
-# rel_thresh = 0.45
-
-## %%
-# start = time.time()
-# z = SPARZIP(path1, stem='dat',output_path='/Users/dimos/Desktop/test', path_image_files2=None, reflect_bp2=False,align_planes=False,compression_level=0,batch_size=1)
-# print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
-##%%
-    # start = time.time()
-    # z.encode()
-    # print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
- 
-    u=SPARUNZIP('/Users/dimos/Desktop/test/dat_*bp1*.npz',
-                None,
-                '/Users/dimos/Desktop/test/dat_*bp1*.mp4',
-                None,
-                output_path="/Users/dimos/Desktop/test/",stem='dat',
-                chunk_size=100)
-
-    start = time.time()
-    u.inflate()
-    end = time.time()
-# print (end-start)
-# #%%
-# da.where(u.sparse_bp1[1]!=0,u.encoded_bp1[1],u.sparse_bp1[1]).compute()
-
-# zz = z.get_processed_frame(start_frame=10)[0,:,:]
-#%%
-# plt.imshow(z.bp1[0].compute())
-#%%
-# da.from_delayed(z.bp1[0],(984, 492, 1108),dtype='uint16').rechunk((1,492,1108))
-# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-
-#%%
-# start = time.time()
-# z.deflate()
-# print('Time elapsed: ', (time.time()-start)/60, ' minutes')
-
-#%%
-# start = time.time()
-# u.inflate()
-# end = time.time()
-# print (end-start)
-# # %%
-# z.bp1.blocks[0:1,0].compute()
-# z.bp1[0]
-# %%
-# vimread('/Users/dimos/Desktop/test/dat_bp1_compression_level_0_part_1.mp4', dtypes='uint16')
-# %%
-# z.processed_bp1
-# %%
-# z.bp1
-# %%
