@@ -64,6 +64,28 @@ def h5r_to_df(filepath):
 
     return df
 
+# optimized code ? Needs testing...
+# import pandas as pd
+
+# Reading hdf5 file
+# def read_hdf5_to_df(filepath):
+#     '''
+#     This function takes a filepath to an hdf5 file and returns a pandas dataframe
+#     '''
+#     # directly read hdf5 file to DataFrame
+#     df = pd.read_hdf(filepath)
+
+#     # Extract nested tuples and create separate columns
+#     df_fit_results = df['fitResults'].apply(lambda x: pd.Series(x, index=['fitResults_' + y for y in ['A', 'x0', 'y0', 'z0', 'bg', 'br', 'dx', 'dy']]))
+#     df_fit_error = df['fitError'].apply(lambda x: pd.Series(x, index=['fitError_' + y for y in ['A', 'x0', 'y0', 'z0', 'bg', 'br', 'dx', 'dy']]))
+#     df_start_params = df['startParams'].apply(lambda x: pd.Series(x, index=['startParams_' + y for y in ['A', 'x0', 'y0', 'z0', 'bg', 'br', 'dx', 'dy']]))
+
+#     # Add newly created columns directly to original DataFrame, drop original ones
+#     df = pd.concat([df, df_fit_results, df_fit_error, df_start_params], axis=1)
+#     df.drop(columns=['fitResults', 'fitError', 'startParams'], inplace=True)
+
+#     return df
+
 
 
 
