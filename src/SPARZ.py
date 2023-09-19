@@ -13,7 +13,7 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-from skvideo.io import FFmpegWriter
+# from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
 from dask import compute
@@ -23,9 +23,11 @@ import os
 import pandas as pd
 import json
 from dask import delayed
-import threading
-
-
+# import threading
+import ffmpeg
+from dask.diagnostics import ProgressBar
+import concurrent.futures
+import av
 
 #%%
 class SPARZIP:
@@ -36,9 +38,10 @@ class SPARZIP:
                  relative_threshold:float = 0.45, 
                  epsilon:int = 12, 
                  kernel_size:int = 9, 
-                 compression_level:int=0,
+                #  compression_level:int=0,
                  batch_size:int=100, 
                  reflect_bp2:bool = False, 
+                 find_peaks:bool = True,
                  align_planes:bool=False):
       
         """
@@ -69,6 +72,9 @@ class SPARZIP:
         self.single_plane = False
         if path_image_files2 is None:
             self.single_plane = True
+        self.path_image_files1 = sorted(glob.glob(path_image_files1))
+        if self.single_plane==False:
+            self.path_image_files2 = sorted(glob.glob(path_image_files2))
         self.bp1, self.bp2 = self.load_images(path_image_files1, path_image_files2)
         # if self.bp1.dtype == 'float32':
         try:
@@ -86,8 +92,9 @@ class SPARZIP:
         self.rel_threshold = relative_threshold
         self.epsilon = epsilon
         self.kernel_size = kernel_size
-        self.compression_level = compression_level
+        # self.compression_level = compression_level
         self.batch_size = batch_size
+        self.find_roi = find_peaks
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -101,44 +108,25 @@ class SPARZIP:
 
         self.processed_bp1,self.processed_bp2 = self.process_images()
 
-
-
-    # def load_images(self, path_image_files1:str, path_image_files2:str):
-    #     print ('Lazily loading images...')
-    #     # if len(glob.glob(path_image_files1)) == 1:
-    #     #     #glob the files in the folder
-    #     #     return dask_image.imread.imread(path_image_files1), dask_image.imread.imread(path_image_files2)
-    #     p1 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files1))]
-    #     if self.single_plane:
-    #         print ('Working with single plane data.')
-    #         # return da.concatenate(p1, axis=0), None
-    #         return p1, None
-    #     print('Working with biplane data.')
-    #     p2 = [dask_image.imread.imread(f) for f in sorted(glob.glob(path_image_files2))]
-    #     # return da.concatenate(p1, axis=0), da.concatenate(p2, axis=0)
-    #     return p1,p2
     @delayed
     def load_dat_file(self,dat_file,dimX, dimY):
-        # Assume that the corresponding JSON file has the same name, but with .json extension
-        # json_file = os.path.splitext(dat_file)[0] + '.json'
-
         raw_data = np.memmap(dat_file, dtype='uint16')
         img_nums = len(raw_data) // (dimX * dimY)
-        
         return np.reshape(raw_data, (img_nums, dimY, dimX))
 
     def load_images(self, path_image_files1:str, path_image_files2:str):
         print ('Lazily loading images...')
-        
-        files1 = sorted(glob.glob(path_image_files1))
+        # files1 = sorted(glob.glob(path_image_files1))
+        files1=self.path_image_files1
+        if not files1:
+            raise ValueError(f"No files found at {path_image_files1}")
         multipage = False
         ext = os.path.splitext(files1[0])[1]
-    
+        if not ext:
+            raise ValueError(f"No extension found for file {files1[0]}")
         if ext == '.tiff' or ext == '.tif':
-            # Check if the first file is multipage
             with TiffFile(files1[0]) as tif:
                 multipage = len(tif.pages) > 1
-
             if multipage:
                 p1 = [dask_image.imread.imread(f) for f in files1]
             else:
@@ -158,22 +146,21 @@ class SPARZIP:
             p1 = []
             for dat_file in files1:
                 raw_data = np.memmap(dat_file, dtype='uint16')
-                
                 img_nums = len(raw_data) // (dimX * dimY)
-                
                 p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16').rechunk((1, dimY, dimX)))
-                # p1.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
         else:
             raise ValueError(f'Unsupported file extension: {ext}.Supported extensions are .tiff, .tif and SRX .dat')
-            
         if self.single_plane:
             print ('Working with single plane data.')
             return p1, None
-            
         print('Working with biplane data.')
-        files2 = sorted(glob.glob(path_image_files2))
-        
+        # files2 = sorted(glob.glob(path_image_files2))
+        files2 = self.path_image_files2
+        if not files2:
+            raise ValueError(f"No files found at {path_image_files2}")
         ext = os.path.splitext(files2[0])[1]
+        if not ext:
+            raise ValueError(f"No extension found for file {files2[0]}")
         if ext == '.tiff' or ext == '.tif':
             if multipage:
                 p2 = [dask_image.imread.imread(f) for f in files2]
@@ -187,13 +174,11 @@ class SPARZIP:
             json_path = os.path.join(dir1, 'data.json')
             if not os.path.exists(json_path):
                 raise ValueError(f"data.json not found in directory: {dir1}")
-
             p2 = []
             for dat_file in files2:
                 raw_data = np.memmap(dat_file, dtype='uint16')
                 img_nums = len(raw_data) // (dimX * dimY)
                 p2.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
-            
         else:
             raise ValueError(f'Unsupported file extension: {ext}')
         return p1, p2
@@ -208,7 +193,7 @@ class SPARZIP:
         # z2 = self.bp2.map_blocks(lambda x:(( x - x.min())/ (x.max() - x.min()) * 65535).astype('uint16'), dtype='uint16')
         z2 = [blck.map_blocks(lambda x:((x - x.min())/ (x.max() - x.min())*65535).astype('uint16'), dtype='uint16') for blck in self.bp2]
         return z1, z2 
-    
+    # @njit
     def find_peaks(self, image:np.ndarray, kernel_size:int, min_distance:int = 1):
 
         #find the local maxima in the image
@@ -219,7 +204,7 @@ class SPARZIP:
                                     )
 
         return coordinates
-
+    # @njit
     def intersection(self, peaks1:np.ndarray, peaks2:np.ndarray, bp1:np.ndarray, epsilon:int):
         # Compute element-wise differences between peaks
         diffs = np.abs(peaks1[:, None, :] - peaks2)
@@ -235,14 +220,14 @@ class SPARZIP:
         common_peaks[peaks1[common_inds_1, 0], peaks1[common_inds_1, 1]] = 1
         
         return common_peaks
-
+    # @njit
     def union(self, peaks1:np.ndarray, peaks2:np.ndarray, bp1):
         merged = np.vstack([peaks1, peaks2])
 
         merged_peaks = np.zeros(bp1)
         merged_peaks[merged[:, 0], merged[:, 1]] = 1    
         return merged_peaks
-
+    # @njit
     def add_kernel(self, image:np.ndarray,kernel_size:int):
 
         kernel = np.ones((kernel_size, kernel_size))
@@ -379,99 +364,139 @@ class SPARZIP:
             saves = []
             for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
-                saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
+                flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
+                # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
+                saves.append(delayed(sparse.save_npz)(self.output_path+flnm1+'.npz',self.processed_bp1[i]))
                 if self.single_plane == False:
-                    saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
+                    flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
+                    saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
+                    # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
             progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
+            
             for i in range(0, len(saves), self.batch_size):
                 batch = saves[i:i+self.batch_size]
-                dask.compute(*batch)
+                dask.compute(*batch, scheduler='threads',num_workers=int(os.cpu_count() * 0.75))
 
                 progress_bar.update(self.batch_size)
             progress_bar.close()
         end = time.time()
 
 
-    def encode(self):
+    def encode(self,compression_lvl:int=0):
         compression_levels = {0: {
-                                                '-vcodec': 'libx265',
-                                                '-pix_fmt': 'yuv444p12le',
-                                                '-channels': '1',
-                                                '-x265-params': 'lossless=1',
+                                                'vcodec': 'libx265',
+                                                'pix_fmt': 'yuv444p16le',
+                                                'channels': '1',
+                                                'x265-params': 'lossless=1',
                                          },
                             1:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '0',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
+                                             'vcodec': 'libx265',
+                                             'crf': '0',
+                                             'pix_fmt': 'yuv444p16le',
+                                             'channels': '1'
                                          },
                             2:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '10',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
+                                             'vcodec': 'libx265',
+                                             'crf': '10',
+                                             'pix_fmt': 'yuv444p16le',
+                                             'channels': '1'
                                          },
 
                             3:{
-                                             '-vcodec': 'libx265',
-                                             '-crf': '15',
-                                             '-pix_fmt': 'yuv444p12le',
-                                             '-channels': '1'
+                                             'vcodec': 'libx265',
+                                             'crf': '15',
+                                             'pix_fmt': 'yuv444p16le',
+                                             'channels': '1'
                                          }                                      
                                          
                                          
                         }
         print('Compressing video...')
         
-        all_writes = []  # This list will store all writes across all videos
-        all_writers = []  # This list will store all writers to close them later
-
+        # Process videos using delayed
+        writes = []
         for k in range(len(self.processed_bp1)):
-            writer1 = FFmpegWriter(f'{self.output_path}{self.stem}_bp1_compression_level_{self.compression_level}_part_{k}.mp4',
-                                outputdict=compression_levels[self.compression_level])
+            input_file_name = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
+            writer_args = compression_levels[compression_lvl]
 
-            writer2 = FFmpegWriter(f'{self.output_path}{self.stem}_bp2_compression_level_{self.compression_level}_part_{k}.mp4',
-                                outputdict=compression_levels[self.compression_level])
+            if self.single_plane:
+                writes.append(delayed(self.write_frames_to_video)(
+                    self.bp1[k], video_name, writer_args
+                ))
+            else:
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
+                # video_name1 = f'{self.output_path}{self.stem}_bp1_compression_level_{compression_lvl}_part_{k}.mp4'
+                writes.append(delayed(self.write_frames_to_video)(
+                    self.bp1[k], video_name1, writer_args
+                ))
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mp4'
+                # video_name2 = f'{self.output_path}{self.stem}_bp2_compression_level_{compression_lvl}_part_{k}.mp4'
+                writes.append(delayed(self.write_frames_to_video)(
+                    self.bp2[k], video_name2, writer_args
+                ))
 
-            writes = []
-            for i in range(self.bp1[k].numblocks[0]):
-                write1 = delayed(writer1.writeFrame)(self.bp1[k].blocks[i,0])
-                writes.append(write1)
+        # Execute the delayed writes
+        with ProgressBar():
+            compute(*writes, scheduler='threads',num_workers=int(os.cpu_count() * 0.75))
 
-                if not self.single_plane:
-                    write2 = delayed(writer2.writeFrame)(self.bp2[k].blocks[i,0])
-                    writes.append(write2)
-            
-            # Store the writes for this video in the all_writes list
-            all_writes.extend(writes)
-            # Store the writers in all_writers list to close them later
-            all_writers.append(writer1)
-            if not self.single_plane:
-                all_writers.append(writer2)
+    def write_frames_to_video(self, bp1_block, video_name, writer_args):
+        # Convert Dask array slices to NumPy arrays
+        bp1_frames = bp1_block
+        # bp2_frames = bp2_block if bp2_block is not None else None
 
-        progress_bar = tqdm(total=len(all_writes), desc="Writing frames", position=0, leave=True)
-        for write in range(0, len(all_writes), self.batch_size):
-            batch = all_writes[write:write+self.batch_size]
-            # write.compute()
-            dask.compute(*batch)
-            progress_bar.update(self.batch_size)
-        progress_bar.close()
+        # Prepare output directories
+        os.makedirs(os.path.dirname(video_name), exist_ok=True)
 
-        # Close all writers
-        for writer in all_writers:
-            writer.close()
+        input_dict = {
+            'format': 'rawvideo',
+            'pix_fmt': 'gray16le',
+            's': f'{bp1_frames.shape[2]}x{bp1_frames.shape[1]}',
+            'y': None
+            # 's': '{}x{}'.format(*input_frames.shape[1:3][[::-1]])
+        }
 
-        
-    def deflate_encode(self):
-        self.deflate()
-        self.encode()
+        ffmpeg_input = ffmpeg.input('pipe:', **input_dict)
+        # Create a ffmpeg output with the writer arguments
+        writer_args['s'] = input_dict['s']
+        # with open(os.devnull, "w") as devnull:
+        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, **writer_args)
+
+        # Run the ffmpeg command
+        # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
+        ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=True)
+
+    def run(self,compression_level:int=0):#,find_peaks:bool=True):
+        if self.find_roi:
+            self.deflate()
+            gc.collect()
+        self.encode(compression_level)
 
 
 class SPARUNZIP:
-    def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str, chunk_size:int=10):
+    def __init__(self, 
+                 path_sparse_bp1:str, 
+                 path_sparse_bp2:str, 
+                 path_encoded_bp1:str, 
+                 path_encoded_bp2:str, 
+                 stem:str, 
+                 output_path:str, 
+                 use_roi:bool=True,
+                 chunk_size:int=10):
+        
+        self.use_roi = use_roi
         if path_encoded_bp2 is None:
             self.single_plane = True
+        else:
+            self.single_plane = False
+        self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
+        self.path_sparse_bp1 = sorted(glob.glob(path_sparse_bp1))
+        if self.single_plane==False:
+            self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
+            self.path_sparse_bp2 = sorted(glob.glob(path_sparse_bp2))
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
@@ -483,164 +508,148 @@ class SPARUNZIP:
         else:
             self.output_path = output_path
 
-    def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
-        print ('Loading sparse matrices...')
-        files_bp1 = sorted(glob.glob(sparse_bp1))
+
+    def load_mp4(self, file_path):
+        container = av.open(file_path)
+        frame_count = container.streams.video[0].frames
+        dtype = None
+
+        # Read the first frame to infer dtype
+        for packet in container.demux():
+            for frame in packet.decode():
+                first_frame = frame.to_ndarray(format='gray16le')
+                dtype = first_frame.dtype
+                break
+            if dtype is not None:
+                break
+
+        def frame_generator(file_path):
+            container = av.open(file_path)
+            video_stream = container.streams.video[0]
+
+            for frame_index, frame in enumerate(container.decode(video_stream)):
+                yield frame_index, frame
+        
+        def read_frame(i):
+            for index,frame in frame_generator(file_path):
+                if index == i:
+                    return frame.to_ndarray(format='gray16le')
+            
+        frames = [delayed(read_frame)(i) for i in range(frame_count)]
+
+        # Create Dask arrays for each frame
+        frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
+
+        # Concatenate frame arrays into a single Dask array
+        # video_array = da.concatenate(frame_arrays, axis=0)
+        video_array = da.stack(frame_arrays, axis=0)
+        # print('vv',video_array.shape)
+        return video_array
+
+
+    def load_sparse(self, sparse_bp1: str, sparse_bp2: str, shapes: tuple):
+        print('Loading sparse matrices...')
+        # files_bp1 = sorted(glob.glob(sparse_bp1))
+        files_bp1 = self.path_sparse_bp1
         if self.single_plane:
-            bp1 = []
-            for i in range(len(files_bp1)):
-                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
             return bp1, None
-        files_bp2 = sorted(glob.glob(sparse_bp2))
+        # files_bp2 = sorted(glob.glob(sparse_bp2))
+        files_bp2 = self.path_sparse_bp2
         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-        bp1,bp2 = [],[]
-        for i in range(len(files_bp1)):
-            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-            bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-            # bp1 = da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[1],shapes[2]))
-            # bp2 = da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[1],shapes[2]))
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
+            bp2 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp2, range(len(files_bp2))))
         return bp1, bp2
-        # return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
-    
-    def decode(self, path_bp1:str, path_bp2:str):
+
+
+
+    def decode(self, path_bp1: str, path_bp2: str):
         print('Decoding images...')
-        files_bp1 = sorted(glob.glob(path_bp1))
+        # files_bp1 = sorted(glob.glob(path_bp1))
+        files_bp1 = self.path_encoded_bp1
         if self.single_plane:
-            bp1 = []
-            for i in range(len(files_bp1)):
-                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
             return bp1, None
-        files_bp2 = sorted(glob.glob(path_bp2))
+        # files_bp2 = sorted(glob.glob(path_bp2))
+        files_bp2 = self.path_encoded_bp2
         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    
-        bp1, bp2 = [], []
-        for i in range(len(files_bp1)):
-            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-            bp2.append(vimread(files_bp2[i], dtypes='uint16'))
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+            bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
         return bp1, bp2
-        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
-    
+
+
     def process_frames(self):
         print('Lazily Processing images...')
         if self.single_plane:
-            return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
-        return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
-
-    # def save_file(self,arr, block_info=None):
-    #     """ Save file to foo-x-y.tif, where x and y are block locations """
-    #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
-    #     tifffile.imwrite(filename, arr, photometric='minisblack')
-    #     return arr
+            return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
+        return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j] != 0, self.sparse_bp2[j], self.encoded_bp2[j]) for j in range(len(self.encoded_bp2))]
     def write_chunk(self, chunk, filename):
-        tif_writer_lock = threading.Lock()
-        with tif_writer_lock:
-            with tifffile.TiffWriter(filename, bigtiff=True) as tif:
-                for frame in chunk:
-                    tif.write(frame, photometric='minisblack')
+        # tif_writer_lock = threading.Lock()
+        # with tif_writer_lock:
+        with tifffile.TiffWriter(filename, bigtiff=True) as tif:
+            for frame in chunk:
+                tif.write(frame, photometric='minisblack')
+
 
     def inflate(self):
         print('Inflating images...')
-        if self.single_plane:
-            chunk_tasks = []
+        if self.use_roi:
+            print('Patching in ROI...')
+            progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
 
-                chunk_size = self.chunk_size  # Adjust this to a suitable size for your data and memory
-
-                filename1 = f'{self.output_path}{self.stem}_part_{k}.tiff'
-
-                for i in range(0, num_frames, chunk_size):
-                    chunk = self.encoded_bp1[k][i:i+chunk_size]
-                    chunk_task = dask.delayed(self.write_chunk)(chunk,filename1)
-                    chunk_tasks.append(chunk_task)
-
-            # Compute and execute the delayed tasks in parallel
-            dask.compute(*chunk_tasks, scheduler='threads')  # Use 'processes' for multiprocessing
-
-            # Wait for all computations to finish
-            dask.config.set(scheduler='sync')  # Restore synchronous scheduler
-
-                # with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-                #     for i in range(0, num_frames, chunk_size):
-                #         chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
-                #         for frame in chunk:
-                #             tif.write(frame, photometric='minisblack')
-        else:
-            for k in range(len(self.encoded_bp1)):
-                num_frames = self.encoded_bp1[k].shape[0]
-
-                chunk_size = self.chunk_size  # Adjust this to a suitable size for your data and memory
-
-                filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
-                filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                # chunk_size = 10  # Adjust this to a suitable size for your data and memory
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                filename1 = f'{self.output_path}{input_file_name1}.tiff'
+                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-                    for i in range(0, num_frames, chunk_size):
-                        chunk = self.encoded_bp1[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                    for i in range(0, num_frames, self.chunk_size):
+                        chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
+                if self.single_plane == False:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    filename2 = f'{self.output_path}{input_file_name2}.tiff'
+                    with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        for i in range(0, num_frames, self.chunk_size):
+                            chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                            for frame in chunk:
+                                tif.write(frame, photometric='minisblack')
 
-                with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-                    for i in range(0, num_frames, chunk_size):
-                        chunk = self.encoded_bp2[k][i:i+chunk_size].compute()  # Compute a chunk of frames
+                progress_bar.update(self.chunk_size)
+            progress_bar.close()           
+        else:
+            print('Extracting x265...')
+            progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
+            for k in range(len(self.encoded_bp1)):
+                num_frames = self.encoded_bp1[k].shape[0]
+
+                # chunk_size = 10  # Adjust this to a suitable size for your data and memory
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                filename1 = f'{self.output_path}{input_file_name1}.tiff'
+                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+
+                with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                    for i in range(0, num_frames, self.chunk_size):
+                        chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
+                if self.single_plane == False:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    filename2 = f'{self.output_path}{input_file_name2}.tiff'
+                    with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        for i in range(0, num_frames, self.chunk_size):
+                            chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                            for frame in chunk:
+                                tif.write(frame, photometric='minisblack')
 
-
-
-#%%
-# path1 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_reflected.tiff'
-# path2 = '/Users/dimos/raw_image_compression/tubulin_biplane/COS-7_Tubulin_SOFI_Flip565_biplane_transmitted.tiff'
-# path1 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
-# path2 = '/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
-# path1 = '/Users/dimos/Desktop/test/raw_bp1/*.tiff'
-# path2 = '/Users/dimos/Desktop/test/raw_bp2/*.tiff'
-# path1 = '/Users/dimos/Desktop/test/*.dat'
-# path1 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp1.tiff'
-# path2 = '/Users/dimos/Dropbox (Lab at Large)/raw_data_tiff/img_*_bp2.tiff'
-# # # # beads_path = '/Users/dimos/raw_image_compression/tubulin_biplane/Biplane_beads_calibration.tif'
-# kernel_size = 9     
-# rel_thresh = 0.45
-
-#%%
-# start = time.time()
-# z = SPARZIP(path1, stem='dat',output_path='/Users/dimos/Desktop/test', path_image_files2=None, reflect_bp2=False,align_planes=False,compression_level=0)
-# print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
-#%%
-# start = time.time()
-# z.deflate_encode()
-# print ('Time elapsed: ', (time.time()-start)/60, ' minutes')
-#%% 
-# u=SPARUNZIP('/Users/dimos/Desktop/test/dat_*bp1*.npz',
-#             None,
-#             '/Users/dimos/Desktop/test/dat_*bp1*.mp4',
-#             None,
-#             output_path="/Users/dimos/Desktop/test/",stem='nir',
-#             chunk_size=100)
-# #%%
-# start = time.time()
-# u.inflate()
-# end = time.time()
-# print (end-start)
-# #%%
-# da.where(u.sparse_bp1[1]!=0,u.encoded_bp1[1],u.sparse_bp1[1]).compute()
-
-# zz = z.get_processed_frame(start_frame=10)[0,:,:]
-#%%
-# plt.imshow(z.bp1[0].compute())
-#%%
-# da.from_delayed(z.bp1[0],(984, 492, 1108),dtype='uint16').rechunk((1,492,1108))
-# plt.imshow(z.get_processed_frame(start_frame=10)[0,:,:])
-
-#%%
-# start = time.time()
-# z.deflate()
-# print('Time elapsed: ', (time.time()-start)/60, ' minutes')
-
-#%%
-# start = time.time()
-# u.inflate()
-# end = time.time()
-# print (end-start)
-# # %%
-# z.bp1.blocks[0:1,0].compute()
+                progress_bar.update(self.chunk_size)
+            progress_bar.close()
