@@ -379,6 +379,7 @@ for file in tqdm(files):
     fig.update_layout(legend= {'itemsizing': 'constant'})
     fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
     fig.show()
+    df_query.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
 
 # save df_out to csv
 df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_distances.csv'), index=False)
@@ -468,6 +469,8 @@ for file in tqdm(files):
     fig.update_layout(legend= {'itemsizing': 'constant'})
     fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
     fig.show()
+    raw.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
+
 
 # save df_out to csv
 df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_distances.csv'), index=False)
@@ -731,4 +734,76 @@ ax.set_ylabel('Value (log)')
 ax.set_xlabel(' ')
 
 plt.show()
+# %%
+import numpy as np
+X= np.array([1,2,3,4,5])
+np.array([X, X**2, X**3])
+# %%
+
+import pandas as pd
+import numpy as np
+from scipy.spatial import cKDTree
+
+def join_on_distance_kdtree(df1, df2, r, cols=['x', 'y', 'z']):
+    """Return unique df1 rows that were within distance r to any point in df2."""
+    
+    # Extract the columns
+    df1_coords = df1[cols].values
+    df2_coords = df2[cols].values
+    
+    # Build a KD-tree for dataframe B
+    tree = cKDTree(df2_coords)
+    
+    # Query the KD-tree for each point in dataframe A
+    matches = tree.query_ball_point(df1_coords, r)
+    
+    # Extract matched rows
+    matched_df1_indices = set()  # To keep track of matched df1 rows
+    
+    for idx1, indices in enumerate(matches):
+        if indices and idx1 not in matched_df1_indices:  # if indices is not empty and idx1 is not matched yet
+            matched_df1_indices.add(idx1)
+    
+    result = df1.iloc[list(matched_df1_indices)].reset_index(drop=True)
+    
+    return result
+
+#%%
+from scipy.spatial import cKDTree
+
+def join_on_distance_kdtree_all_matches(df1, df2, r, cols=['x', 'y', 'z']):
+    """Return all df1 rows that were within distance r to any point in df2, without duplicates."""
+    
+    # Extract the columns
+    df1_coords = df1[cols].values
+    df2_coords = df2[cols].values
+    
+    # Build a KD-tree for dataframe B
+    tree = cKDTree(df2_coords)
+    
+    # Query the KD-tree for each point in dataframe A
+    matches = tree.query_ball_point(df1_coords, r)
+    
+    # Create a mask to identify which rows in df1 have matches in df2
+    matched_mask = [bool(indices) for indices in matches]
+    
+    # Filter df1 using the mask to get the result
+    result = df1[matched_mask].reset_index(drop=True)
+    
+    return result
+
+
+
+#%%
+r = 40
+# %%
+raw_locs = join_on_distance_kdtree(raw, locs, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
+# %%
+locs_raw = join_on_distance_kdtree(locs, raw, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
+
+# %%
+raw_locs_all = join_on_distance_kdtree_all_matches(raw, locs, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
+# %%
+locs_raw_all = join_on_distance_kdtree_all_matches(locs, raw, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
+
 # %%
