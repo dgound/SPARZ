@@ -1,3 +1,6 @@
+# This script is used to create a TIFF stack from a folder containing single images.
+
+
 import os
 import numpy as np
 import imageio
@@ -40,22 +43,30 @@ def convert_images_to_stack(images):
     return stack
 
 if __name__ == '__main__':
-    # Define paths
-    input_folder = '/path/to/your/input_folder'
-    output_folder = '/path/to/your/output_folder'
-    output_filename = 'output_file_name.tif'
+    main_folder = '/Users/laurabreimann/Desktop/simulated_tubulin_data/raw'
     
-    # Ensure output folder exists
-    os.makedirs(output_folder, exist_ok=True)
+    # Iterate over each subfolder in the main folder
+    for subfolder in os.listdir(main_folder):
+        subfolder_path = os.path.join(main_folder, subfolder)
+        
+        if os.path.isdir(subfolder_path):
+            # Define input and output folders within the subfolder
+            input_folder = os.path.join(subfolder_path, 'uncompressed_biplane')
+            output_folder = os.path.join(subfolder_path)
+            output_filename = 'sequence-MT0.N1.HD-BP.tif'
+            
+            # Ensure output folder exists
+            os.makedirs(output_folder, exist_ok=True)
 
-    # Load images and convert to a single TIFF stack
-    images = load_images_from_folder(input_folder)
-    stack = convert_images_to_stack(images)
-    
-    # Save the stack as a TIFF
-    output_tiff_path = os.path.join(output_folder, output_filename)
-    metadata = {'axes': 'TZCYXS', 'shape': stack.shape}
-    tifffile.imsave(output_tiff_path, stack, dtype=np.uint16, bigtiff=True, imagej=True, metadata=metadata)
-    
-    print(f"TIFF stack saved as '{output_tiff_path}'.")
-    print("Stack dimensions:", stack.shape)
+            # Load images and convert to a single TIFF stack
+            if os.path.exists(input_folder):
+                images = load_images_from_folder(input_folder)
+                stack = convert_images_to_stack(images)
+                
+                # Save the stack as a TIFF in the output folder
+                output_tiff_path = os.path.join(output_folder, output_filename)
+                metadata = {'axes': 'TZCYXS', 'shape': stack.shape}
+                tifffile.imsave(output_tiff_path, stack, dtype=np.uint16, bigtiff=True, imagej=True, metadata=metadata)
+                
+                print(f"TIFF stack saved as '{output_tiff_path}'.")
+                print("Stack dimensions:", stack.shape)
