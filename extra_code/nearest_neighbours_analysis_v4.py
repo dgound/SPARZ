@@ -1,11 +1,11 @@
 #%%
 import pandas as pd
 import os
-from sklearn.neighbors import NearestNeighbors
+# from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 import numpy as np
 import sys
-sys.path.append('/Users/alioutas/Library/CloudStorage/GoogleDrive-alioutas@gmail.com/My Drive/GitHub/SPARZ3/extra_code')
+# sys.path.append('/Users/alioutas/Library/CloudStorage/GoogleDrive-alioutas@gmail.com/My Drive/GitHub/SPARZ3/extra_code')
 from h5r_functions import h5r_to_df
 from concurrent.futures import ProcessPoolExecutor
 from scipy.spatial import distance
@@ -15,7 +15,7 @@ import multiprocessing
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import entropy
-from joblib import Parallel, delayed
+# from joblib import Parallel, delayed
 from tqdm import tqdm
 import glob
 
@@ -500,8 +500,8 @@ df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.
 #%%
 import pandas as pd
 
-df_out = pd.read_csv('/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/output/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_distances.csv')
-df_stats_out = pd.read_csv('/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/output/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_metrics.csv')
+df_out = pd.read_csv('/Users/dimos/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_distances.csv')
+# df_stats_out = pd.read_csv('/Users/dimos/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_metrics.csv')
 
 #%%
 df_out
@@ -806,4 +806,22 @@ raw_locs_all = join_on_distance_kdtree_all_matches(raw, locs, r = r, cols = ['fi
 # %%
 locs_raw_all = join_on_distance_kdtree_all_matches(locs, raw, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
 
+# %%
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# Create a DataFrame
+data = {
+    'Method': ['Near_lossless', 'level_1', 'level_2', 'level_3'],
+    'Wasserstein Distance': [0.0919, 6.6788, 9.5820, 11.3515] 
+}
+
+df = pd.DataFrame(data)
+
+# Create a Seaborn bar plot
+plt.figure(figsize=(10, 5))
+sns.barplot(x='Method', y='Wasserstein Distance', data=df)
+plt.title('Wasserstein Distance for Different Compression levels')
+plt.savefig('/Users/dimos/Desktop/wd.png', dpi=300)
 # %%

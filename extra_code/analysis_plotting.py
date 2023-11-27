@@ -4,7 +4,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import sys
-sys.path.append('/Users/alioutas/Library/CloudStorage/GoogleDrive-alioutas@gmail.com/My Drive/GitHub/SPARZ3/extra_code')
+# sys.path.append('/Users/alioutas/Library/CloudStorage/GoogleDrive-alioutas@gmail.com/My Drive/GitHub/SPARZ3/extra_code')
 import seaborn as sns
 import plotly.express as px
 import plotly.graph_objects as go
@@ -24,8 +24,8 @@ import pandas as pd
 # df_stats_out = pd.read_csv('/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/output/nir_etal_vs_raw_20230922_sparz_lev1_k11_rt55_metrics.csv')
 
 #VS_COMPRESSED
-df_out = pd.read_csv('/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/output/nir_etal_vs_compressed_20230922_sparz_lev1_k11_rt55_distances.csv')
-df_stats_out = pd.read_csv('/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/output/nir_etal_vs_compressed_20230922_sparz_lev1_k11_rt55_metrics.csv')
+df_out = pd.read_csv('/Users/dimos/Dropbox (Lab at Large)/data_compression_localizations/Nir_et_al/output/nir_etal_vs_compressed_20230922_sparz_lev1_k11_rt55_distances.csv')
+df_stats_out = pd.read_csv('/Users/dimos/Dropbox (Lab at Large)/data_compression_localizations/Nir_et_al/output/nir_etal_vs_compressed_20230922_sparz_lev1_k11_rt55_metrics.csv')
 
 
 # %%
@@ -128,12 +128,12 @@ g.legend(title='Codec', bbox_to_anchor=(0., -0.4, 1., .102), loc='lower center',
 sns.despine()
 plt.show()
 
-
+#%%
 #%%
 # Boxplot of distances for each label
 
 sns.set_theme(style="whitegrid")
-ax = sns.boxplot(x="label", y="distance", data=df_out)
+ax = sns.boxplot(x="label", y="distance", data=df_out[(df_out.label!='ffv1') & (df_out.label!='x265') & (df_out.label!='h264')])
 ax.set(yscale="log")
 ax.set_ylabel('Distance (log)')
 plt.axhline(y=40, color='r', linestyle='--', linewidth=2)

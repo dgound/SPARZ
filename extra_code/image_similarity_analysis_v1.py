@@ -4,7 +4,7 @@ from scipy.stats import wasserstein_distance as wd
 import glob
 import matplotlib.pyplot as plt
 import seaborn as sns
-from natsort import natsorted
+# from natsort import natsorted
 from skimage.metrics import structural_similarity as compare_ssim
 from tqdm import tqdm
 import pandas as pd
@@ -91,12 +91,19 @@ raw_mean_abs.to_csv('/Users/alioutas/Dropbox (HMS)/data_compression/analysis/202
 
 #%%
 # read the csv files
-raw_wd = pd.read_csv('/Users/alioutas/Dropbox (HMS)/data_compression/analysis/20230917_image_analysis/20230917_raw_wd.csv')
-raw_ssim = pd.read_csv('/Users/alioutas/Dropbox (HMS)/data_compression/analysis/20230917_image_analysis/20230917_raw_ssim.csv')
-raw_mse = pd.read_csv('/Users/alioutas/Dropbox (HMS)/data_compression/analysis/20230917_image_analysis/20230917_raw_mse.csv')
-raw_mean_abs = pd.read_csv('/Users/alioutas/Dropbox (HMS)/data_compression/analysis/20230917_image_analysis/20230917_raw_mean_abs.csv')
-
+raw_wd = pd.read_csv('/Users/dimos/20230917_raw_wd.csv')
+raw_ssim = pd.read_csv('/Users/dimos/20230917_raw_ssim.csv')
+raw_mse = pd.read_csv('/Users/dimos/20230917_raw_mse.csv')
+raw_mean_abs = pd.read_csv('/Users/dimos/20230917_raw_mean_abs.csv')
 #%%
+raw_ssim
+#%%
+raw_ssim['codec'] = raw_ssim['codec'].map({'level_0_kernel_11_relThres_55': 'Level 0 (Near lossless)', 
+                                     'level_1_kernel_11_relThres_55': 'Level 1',
+                                     'level_2_kernel_11_relThres_55': 'Level 2',
+                                     'level_3_kernel_11_relThres_55': 'Level 3'})
+#%%
+
 # kde plot of the wasserstein distances
 sns.kdeplot(data=raw_wd.rename(columns={'value': 'wd'}).melt(id_vars='codec', value_vars='wd'), x='value', hue='codec')
 plt.yscale('log')
@@ -104,17 +111,21 @@ plt.xscale('log')
 plt.title('Wasserstein distance')
 # plt.hist(raw_wd, bins=1000, color='codec')
 plt.show()
-
+#%%
+raw_ssim.rename(columns={'codec': 'Compression Level'}, inplace=True)
+#%%
+raw_ssim
 #%%
 # kde plot of the ssim distances
 # sns.kdeplot(raw_ssim)
 # plt.hist(raw_ssim, bins=1000)
-sns.kdeplot(data=raw_ssim.rename(columns={'value': 'wd'}).melt(id_vars='codec', value_vars='wd'), x='value', hue='codec')
+sns.kdeplot(data=raw_ssim.rename(columns={'value': 'wd'}).melt(id_vars='Compression Level', value_vars='wd'), x='value', hue='Compression Level')
 plt.yscale('log')
-plt.xscale('log')
+# plt.xscale()
 plt.title('Structural similarity')
 #log
-plt.show()
+# plt.show()
+plt.savefig('/Users/dimos/Desktop/wd.png', dpi=300)
 
 #%%
 # kde plot of the mse distances
