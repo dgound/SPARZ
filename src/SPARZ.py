@@ -477,7 +477,8 @@ class SPARZIP:
 
 
 class SPARUNZIP:
-    def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str, use_roi:bool=True, chunk_size:int=10):
+    def __init__(self, path_sparse_bp1:str, path_encoded_bp1:str, stem:str, output_path:str, path_sparse_bp2:str=None, path_encoded_bp2:str=None, use_roi:bool=True, chunk_size:int=10):
+        self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
@@ -538,11 +539,13 @@ class SPARUNZIP:
     #     tifffile.imwrite(filename, arr, photometric='minisblack')
     #     return arr
 
-    def inflate(self):
+    def run(self):
         print('Inflating images...')
         if self.use_roi:
             print('Patching in ROI...')
-            progress_bar = tqdm(total=len(self.processed_bp1), desc="Extracting frames", position=0, leave=True)
+            progress_bar1 = tqdm(total=len(self.processed_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
+            if self.encoded_bp2 is not None:
+                progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 1", position=0, leave=True)
             for k in range(len(self.processed_bp1)):
                 num_frames = self.processed_bp1[k].shape[0]
 
@@ -555,20 +558,25 @@ class SPARUNZIP:
                         chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
+                        progress_bar1.update(self.chunk_size)
+                progress_bar1.close()
                 if self.encoded_bp2 is not None:
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
                         for i in range(0, num_frames, self.chunk_size):
                             chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                             for frame in chunk:
                                 tif.write(frame, photometric='minisblack')
-                progress_bar.update(self.chunk_size)
-            progress_bar.close()
+                            progress_bar2.update(self.chunk_size)
+                    progress_bar2.close()
+                
+            
         else:
             print('Extracting background only...')
-            progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
+            
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
 
@@ -577,18 +585,23 @@ class SPARUNZIP:
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                    progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
                     for i in range(0, num_frames, self.chunk_size):
                         chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
+                        progress_bar.update(self.chunk_size)
+                progress_bar.close()
                 if self.encoded_bp2 is not None:
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
                         for i in range(0, num_frames, self.chunk_size):
                             chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                             for frame in chunk:
                                 tif.write(frame, photometric='minisblack')
-                progress_bar.update(self.chunk_size)
-            progress_bar.close()
+                            progress_bar.update(self.chunk_size)
+                    progress_bar.close()
+        print('Done.')
