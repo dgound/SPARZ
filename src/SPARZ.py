@@ -467,7 +467,7 @@ class SPARZIP:
 
         # Run the ffmpeg command
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
-        ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=True)
+        ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
     def run(self,compression_level:int=0):#,find_peaks:bool=True):
         if self.find_roi:
@@ -477,179 +477,301 @@ class SPARZIP:
 
 
 class SPARUNZIP:
-    def __init__(self, 
-                 path_sparse_bp1:str, 
-                 path_sparse_bp2:str, 
-                 path_encoded_bp1:str, 
-                 path_encoded_bp2:str, 
-                 stem:str, 
-                 output_path:str, 
-                 use_roi:bool=True,
-                 chunk_size:int=10):
-        
-        self.use_roi = use_roi
-        if path_encoded_bp2 is None:
-            self.single_plane = True
-        else:
-            self.single_plane = False
-        self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
-        self.path_sparse_bp1 = sorted(glob.glob(path_sparse_bp1))
-        if self.single_plane==False:
-            self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
-            self.path_sparse_bp2 = sorted(glob.glob(path_sparse_bp2))
+    def __init__(self, path_sparse_bp1:str, path_sparse_bp2:str, path_encoded_bp1:str, path_encoded_bp2:str, stem:str, output_path:str, use_roi:bool=True, chunk_size:int=10):
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
         self.processed_bp1, self.processed_bp2 = self.process_frames()
-        self.chunk_size = chunk_size
         self.stem = stem
         if output_path[-1] != '/':
             self.output_path = output_path+"/"
         else:
             self.output_path = output_path
+        self.use_roi = use_roi
+        self.chunk_size = chunk_size
 
-
-    def load_mp4(self, file_path):
-        container = av.open(file_path)
-        frame_count = container.streams.video[0].frames
-        dtype = None
-
-        # Read the first frame to infer dtype
-        for packet in container.demux():
-            for frame in packet.decode():
-                first_frame = frame.to_ndarray(format='gray16le')
-                dtype = first_frame.dtype
-                break
-            if dtype is not None:
-                break
-
-        def frame_generator(file_path):
-            container = av.open(file_path)
-            video_stream = container.streams.video[0]
-
-            for frame_index, frame in enumerate(container.decode(video_stream)):
-                yield frame_index, frame
-        
-        def read_frame(i):
-            for index,frame in frame_generator(file_path):
-                if index == i:
-                    return frame.to_ndarray(format='gray16le')
-            
-        frames = [delayed(read_frame)(i) for i in range(frame_count)]
-
-        # Create Dask arrays for each frame
-        frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
-
-        # Concatenate frame arrays into a single Dask array
-        # video_array = da.concatenate(frame_arrays, axis=0)
-        video_array = da.stack(frame_arrays, axis=0)
-        # print('vv',video_array.shape)
-        return video_array
-
-
-    def load_sparse(self, sparse_bp1: str, sparse_bp2: str, shapes: tuple):
-        print('Loading sparse matrices...')
-        # files_bp1 = sorted(glob.glob(sparse_bp1))
-        files_bp1 = self.path_sparse_bp1
-        if self.single_plane:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
-            return bp1, None
-        # files_bp2 = sorted(glob.glob(sparse_bp2))
-        files_bp2 = self.path_sparse_bp2
-        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
-            bp2 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp2, range(len(files_bp2))))
-        return bp1, bp2
-
-
-
-    def decode(self, path_bp1: str, path_bp2: str):
+    def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
+        print ('Loading sparse matrices...')
+        files_bp1 = sorted(glob.glob(sparse_bp1))
+        if sparse_bp2 is not None:
+            files_bp2 = sorted(glob.glob(sparse_bp2))
+            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+            bp1,bp2 = [],[]
+            for i in range(len(files_bp1)):
+                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+                bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+                # bp1 = da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[1],shapes[2]))
+                # bp2 = da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[1],shapes[2]))
+            return bp1, bp2
+        # return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
+        bp1 =[]
+        for i in range(len(files_bp1)):
+            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+        return bp1, None
+    
+    def decode(self, path_bp1:str, path_bp2:str):
         print('Decoding images...')
-        # files_bp1 = sorted(glob.glob(path_bp1))
-        files_bp1 = self.path_encoded_bp1
-        if self.single_plane:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
-            return bp1, None
-        # files_bp2 = sorted(glob.glob(path_bp2))
-        files_bp2 = self.path_encoded_bp2
-        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
-            bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
-        return bp1, bp2
-
-
+        files_bp1 = sorted(glob.glob(path_bp1))
+        if path_bp2 is not None:
+            files_bp2 = sorted(glob.glob(path_bp2))
+            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+            bp1, bp2 = [], []
+            for i in range(len(files_bp1)):
+                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+                bp2.append(vimread(files_bp2[i], dtypes='uint16'))
+            return bp1, bp2
+        bp1 = []
+        for i in range(len(files_bp1)):
+            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+        return bp1, None
+        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
+    
     def process_frames(self):
         print('Lazily Processing images...')
-        if self.single_plane:
-            return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
-        return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j] != 0, self.sparse_bp2[j], self.encoded_bp2[j]) for j in range(len(self.encoded_bp2))]
-    def write_chunk(self, chunk, filename):
-        # tif_writer_lock = threading.Lock()
-        # with tif_writer_lock:
-        with tifffile.TiffWriter(filename, bigtiff=True) as tif:
-            for frame in chunk:
-                tif.write(frame, photometric='minisblack')
+        if self.encoded_bp2 is None:
+            return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
+        return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
 
+    # def save_file(self,arr, block_info=None):
+    #     """ Save file to foo-x-y.tif, where x and y are block locations """
+    #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
+    #     tifffile.imwrite(filename, arr, photometric='minisblack')
+    #     return arr
 
     def inflate(self):
         print('Inflating images...')
         if self.use_roi:
             print('Patching in ROI...')
-            progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
-            for k in range(len(self.encoded_bp1)):
-                num_frames = self.encoded_bp1[k].shape[0]
+            progress_bar = tqdm(total=len(self.processed_bp1), desc="Extracting frames", position=0, leave=True)
+            for k in range(len(self.processed_bp1)):
+                num_frames = self.processed_bp1[k].shape[0]
 
-                # chunk_size = 10  # Adjust this to a suitable size for your data and memory
                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
-                filename1 = f'{self.output_path}{input_file_name1}.tiff'
+                filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
-                # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
                     for i in range(0, num_frames, self.chunk_size):
                         chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
-                if self.single_plane == False:
+                if self.encoded_bp2 is not None:
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
-                    filename2 = f'{self.output_path}{input_file_name2}.tiff'
+                    filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
                         for i in range(0, num_frames, self.chunk_size):
                             chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                             for frame in chunk:
                                 tif.write(frame, photometric='minisblack')
-
                 progress_bar.update(self.chunk_size)
-            progress_bar.close()           
+            progress_bar.close()
         else:
-            print('Extracting x265...')
+            print('Extracting background only...')
             progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
 
-                # chunk_size = 10  # Adjust this to a suitable size for your data and memory
                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
-                filename1 = f'{self.output_path}{input_file_name1}.tiff'
+                filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
-                # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
                     for i in range(0, num_frames, self.chunk_size):
                         chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
-                if self.single_plane == False:
+                if self.encoded_bp2 is not None:
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
-                    filename2 = f'{self.output_path}{input_file_name2}.tiff'
+                    filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
                         for i in range(0, num_frames, self.chunk_size):
                             chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                             for frame in chunk:
                                 tif.write(frame, photometric='minisblack')
-
                 progress_bar.update(self.chunk_size)
             progress_bar.close()
+
+
+
+# class SPARUNZIP:
+#     def __init__(self, 
+#                  path_sparse_bp1:str, 
+#                  path_sparse_bp2:str, 
+#                  path_encoded_bp1:str, 
+#                  path_encoded_bp2:str, 
+#                  stem:str, 
+#                  output_path:str, 
+#                  use_roi:bool=True,
+#                  chunk_size:int=10):
+        
+#         self.use_roi = use_roi
+#         if path_encoded_bp2 is None:
+#             self.single_plane = True
+#         else:
+#             self.single_plane = False
+#         self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
+#         self.path_sparse_bp1 = sorted(glob.glob(path_sparse_bp1))
+#         if self.single_plane==False:
+#             self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
+#             self.path_sparse_bp2 = sorted(glob.glob(path_sparse_bp2))
+#         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
+#         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
+#         self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
+#         self.processed_bp1, self.processed_bp2 = self.process_frames()
+#         self.chunk_size = chunk_size
+#         self.stem = stem
+#         if output_path[-1] != '/':
+#             self.output_path = output_path+"/"
+#         else:
+#             self.output_path = output_path
+
+
+
+
+#     def load_mp4(self, file_path):
+#         container = av.open(file_path)
+#         frame_count = container.streams.video[0].frames
+#         dtype = None
+
+#         # Read the first frame to infer dtype
+#         for packet in container.demux():
+#             for frame in packet.decode():
+#                 first_frame = frame.to_ndarray(format='gray16le')
+#                 dtype = first_frame.dtype
+#                 break
+#             if dtype is not None:
+#                 break
+
+#         def frame_generator(file_path):
+#             container = av.open(file_path)
+#             video_stream = container.streams.video[0]
+
+#             for frame_index, frame in enumerate(container.decode(video_stream)):
+#                 yield frame_index, frame
+        
+#         def read_frame(i):
+#             for index,frame in frame_generator(file_path):
+#                 if index == i:
+#                     return frame.to_ndarray(format='gray16le')
+            
+#         frames = [delayed(read_frame)(i) for i in range(frame_count)]
+
+#         # Create Dask arrays for each frame
+#         frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
+
+#         # Concatenate frame arrays into a single Dask array
+#         # video_array = da.concatenate(frame_arrays, axis=0)
+#         video_array = da.stack(frame_arrays, axis=0)
+#         # print('vv',video_array.shape)
+#         return video_array
+
+
+#     def load_sparse(self, sparse_bp1: str, sparse_bp2: str, shapes: tuple):
+#         print('Loading sparse matrices...')
+#         # files_bp1 = sorted(glob.glob(sparse_bp1))
+#         files_bp1 = self.path_sparse_bp1
+#         if self.single_plane:
+#             with concurrent.futures.ThreadPoolExecutor() as executor:
+#                 bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
+#             return bp1, None
+#         # files_bp2 = sorted(glob.glob(sparse_bp2))
+#         files_bp2 = self.path_sparse_bp2
+#         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+#         with concurrent.futures.ThreadPoolExecutor() as executor:
+#             bp1 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp1, range(len(files_bp1))))
+#             bp2 = list(executor.map(lambda file, i: da.from_array(sparse.load_npz(file), chunks=(1, shapes[i][1], shapes[i][2])), files_bp2, range(len(files_bp2))))
+#         return bp1, bp2
+
+
+
+#     def decode(self, path_bp1: str, path_bp2: str):
+#         print('Decoding images...')
+#         # files_bp1 = sorted(glob.glob(path_bp1))
+#         files_bp1 = self.path_encoded_bp1
+#         if self.single_plane:
+#             with concurrent.futures.ThreadPoolExecutor() as executor:
+#                 bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+#             return bp1, None
+#         # files_bp2 = sorted(glob.glob(path_bp2))
+#         files_bp2 = self.path_encoded_bp2
+#         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+#         with concurrent.futures.ThreadPoolExecutor() as executor:
+#             bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+#             bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
+#         return bp1, bp2
+
+
+#     def process_frames(self):
+#         print('Lazily Processing images...')
+#         if self.single_plane:
+#             return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
+#         return [da.where(self.sparse_bp1[i] != 0, self.sparse_bp1[i], self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j] != 0, self.sparse_bp2[j], self.encoded_bp2[j]) for j in range(len(self.encoded_bp2))]
+    
+#     def write_chunk(self, chunk, filename):
+#         # tif_writer_lock = threading.Lock()
+#         # with tif_writer_lock:
+#         with tifffile.TiffWriter(filename, bigtiff=True) as tif:
+#             for frame in chunk:
+#                 tif.write(frame, photometric='minisblack')
+
+
+#     def inflate(self):
+#         print('Inflating images...')
+#         if self.use_roi:
+#             print('Patching in ROI...')
+#             progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
+#             for k in range(len(self.encoded_bp1)):
+#                 num_frames = self.encoded_bp1[k].shape[0]
+
+#                 # chunk_size = 10  # Adjust this to a suitable size for your data and memory
+#                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+#                 filename1 = f'{self.output_path}{input_file_name1}.tiff'
+#                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+#                 # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+
+#                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+#                     for i in range(0, num_frames, self.chunk_size):
+#                         chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+#                         for frame in chunk:
+#                             tif.write(frame, photometric='minisblack')
+#                 if self.single_plane == False:
+#                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+#                     filename2 = f'{self.output_path}{input_file_name2}.tiff'
+#                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+#                         for i in range(0, num_frames, self.chunk_size):
+#                             chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+#                             for frame in chunk:
+#                                 tif.write(frame, photometric='minisblack')
+
+#                 progress_bar.update(self.chunk_size)
+#             progress_bar.close()           
+#         else:
+#             print('Extracting x265...')
+#             progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames", position=0, leave=True)
+#             for k in range(len(self.encoded_bp1)):
+#                 num_frames = self.encoded_bp1[k].shape[0]
+
+#                 # chunk_size = 10  # Adjust this to a suitable size for your data and memory
+#                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+#                 filename1 = f'{self.output_path}{input_file_name1}.tiff'
+#                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+#                 # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+
+#                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+#                     for i in range(0, num_frames, self.chunk_size):
+#                         chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+#                         for frame in chunk:
+#                             tif.write(frame, photometric='minisblack')
+#                 if self.single_plane == False:
+#                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+#                     filename2 = f'{self.output_path}{input_file_name2}.tiff'
+#                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+#                         for i in range(0, num_frames, self.chunk_size):
+#                             chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+#                             for frame in chunk:
+#                                 tif.write(frame, photometric='minisblack')
+
+#                 progress_bar.update(self.chunk_size)
+#             progress_bar.close()
