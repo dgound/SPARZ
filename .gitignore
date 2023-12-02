@@ -6,3 +6,6 @@ src/__pycache__/reader.cpython-39.pyc
 src/__pycache__/reader.cpython-310.pyc
 .DS_Store
 .vscode/launch.json
+.DS_Store
+*.pyc
+.DS_Store
