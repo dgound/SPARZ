@@ -40,6 +40,7 @@ class SPARZIP:
                  kernel_size:int = 9, 
                 #  compression_level:int=0,
                  batch_size:int=100, 
+                 stack_size:int=250,
                  reflect_bp2:bool = False, 
                  find_peaks:bool = True,
                  align_planes:bool=False):
@@ -94,6 +95,7 @@ class SPARZIP:
         self.kernel_size = kernel_size
         # self.compression_level = compression_level
         self.batch_size = batch_size
+        self.stack_size = stack_size
         self.find_roi = find_peaks
         if reflect_bp2:
             if self.single_plane:
@@ -131,8 +133,8 @@ class SPARZIP:
                 p1 = [dask_image.imread.imread(f) for f in files1]
             else:
                 p1 = []
-                for i in range(0, len(files1), 250):
-                    images = [dask_image.imread.imread(f) for f in files1[i:i+250]]
+                for i in range(0, len(files1), self.stack_size):
+                    images = [dask_image.imread.imread(f) for f in files1[i:i+self.stack_size]]
                     p1.append(da.concatenate(images,axis=0))
         elif ext == '.dat':
             dir1=os.path.dirname(files1[0])
@@ -166,8 +168,8 @@ class SPARZIP:
                 p2 = [dask_image.imread.imread(f) for f in files2]
             else:
                 p2 = []
-                for i in range(0, len(files2), 250):
-                    images = [dask_image.imread.imread(f) for f in files2[i:i+250]]
+                for i in range(0, len(files2), self.stack_size):
+                    images = [dask_image.imread.imread(f) for f in files2[i:i+self.stack_size]]
                     p2.append(da.concatenate(images,axis=0))
         elif ext == '.dat':
             dir1=os.path.dirname(files1[0])
