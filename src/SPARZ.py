@@ -400,7 +400,7 @@ class SPARZIP:
                                          },
                             2:{
                                              'vcodec': 'libx265',
-                                             'crf': '10',
+                                             'crf': '7',
                                              'pix_fmt': 'yuv444p16le',
                                              'channels': '1'
                                          },
