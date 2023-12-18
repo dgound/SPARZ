@@ -547,13 +547,13 @@ class SPARUNZIP:
             print('Patching in ROI...')
             progress_bar1 = tqdm(total=len(self.processed_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
             if self.encoded_bp2 is not None:
-                progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 1", position=0, leave=True)
+                progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 1", position=0, leave=True) #not sure this is correct?
             for k in range(len(self.processed_bp1)):
                 num_frames = self.processed_bp1[k].shape[0]
 
-                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
                 filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
-                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
                     for i in range(0, num_frames, self.chunk_size):
@@ -563,9 +563,9 @@ class SPARUNZIP:
                         progress_bar1.update(self.chunk_size)
                 progress_bar1.close()
                 if self.encoded_bp2 is not None:
-                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
-                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                    
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
                         progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
                         for i in range(0, num_frames, self.chunk_size):
@@ -582,9 +582,9 @@ class SPARUNZIP:
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
 
-                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
                 filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
-                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+               
 
                 with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
                     progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
@@ -595,9 +595,9 @@ class SPARUNZIP:
                         progress_bar.update(self.chunk_size)
                 progress_bar.close()
                 if self.encoded_bp2 is not None:
-                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
-                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
                         progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
                         for i in range(0, num_frames, self.chunk_size):
