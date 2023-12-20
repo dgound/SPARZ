@@ -2,9 +2,7 @@
 import numpy as np
 import tifffile
 from tifffile import TiffFile
-import matplotlib.pyplot as plt
 from skimage.feature import peak_local_max
-# from skimage import imread_collection
 import glob
 import time
 import sparse
@@ -13,7 +11,6 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-# from skvideo.io import FFmpegWriter
 from reader import imread as vimread
 import dask
 from dask import compute
@@ -23,11 +20,10 @@ import os
 import pandas as pd
 import json
 from dask import delayed
-# import threading
 import ffmpeg
 from dask.diagnostics import ProgressBar
-import concurrent.futures
-import av
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import gc
 
 #%%
 class SPARZIP:
@@ -43,7 +39,9 @@ class SPARZIP:
                  stack_size:int=250,
                  reflect_bp2:bool = False, 
                  find_peaks:bool = True,
-                 align_planes:bool=False
+                 align_planes:bool=False,
+                 num_workers:int=4,
+                 num_dask_workers:int=2
                  ):
       
         """
@@ -99,6 +97,8 @@ class SPARZIP:
         self.batch_size = batch_size
         self.stack_size = stack_size
         self.find_roi = find_peaks
+        self.num_workers = num_workers
+        self.num_dask_workers = num_dask_workers
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -318,7 +318,7 @@ class SPARZIP:
             return self.processed_bp2[index].blocks[start_frame:end_frame,0].compute().todense()
         
     def process_images(self):
-        print('Mapping functions to images...')
+        print('Processing images...')
         # map1 = self.bp1.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16')
         map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16') for blck in self.bp1]
         if self.single_plane == False:
@@ -380,11 +380,14 @@ class SPARZIP:
             
             for i in range(0, len(saves), self.batch_size):
                 batch = saves[i:i+self.batch_size]
-                dask.compute(*batch, scheduler='threads',num_workers=int(os.cpu_count() * 0.75))
+                dask.compute(*batch, scheduler='threads',num_workers=self.num_workers)
 
                 progress_bar.update(self.batch_size)
             progress_bar.close()
         end = time.time()
+        
+
+
 
     def determine_ctu_size(self, image_width, image_height):
         # Example logic for determining CTU size
@@ -525,7 +528,7 @@ class SPARZIP:
 
 
 class SPARUNZIP:
-    def __init__(self, path_sparse_bp1:str, path_encoded_bp1:str, stem:str, output_path:str, path_sparse_bp2:str=None, path_encoded_bp2:str=None, use_roi:bool=True, chunk_size:int=10, num_workers:int=8):
+    def __init__(self, path_sparse_bp1:str, path_encoded_bp1:str, stem:str, output_path:str, path_sparse_bp2:str=None, path_encoded_bp2:str=None, use_roi:bool=True, chunk_size:int=10, num_workers:int=4):
         self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
@@ -589,112 +592,83 @@ class SPARUNZIP:
     #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
     #     tifffile.imwrite(filename, arr, photometric='minisblack')
     #     return arr
+    
+    def process_k(self,frames_bp1, frames_bp2, k):
+        with dask.config.set(scheduler='threads', num_workers=self.num_dask_workers):
+            num_frames = frames_bp1[k].shape[0]
+            file_path = self.encoded_bp1_files[k]
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(file_path))[1])[0]
+            filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
 
-    def run(self):
-        with dask.config.set(scheduler='threads',num_workers=self.num_workers):
-            print('Inflating images...')
-            # Check for an interactive environment to decide whether to show progress bars.
-            show_progress_bar = False
-            try:
-                get_ipython()
-                # Since get_ipython didn't raise an exception, we're in an interactive environment.
-                show_progress_bar = True
-            except NameError:
-                # We're not in an interactive environment (standard Python interpreter or a standalone script).
+            with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                for i in range(0, num_frames, self.chunk_size):
+                    chunk = frames_bp1[k][i:i+self.chunk_size].compute()
+                    for frame in chunk:
+                        tif.write(frame, photometric='minisblack')
+
+            if frames_bp2 is not None:
+                file_path2 = self.encoded_bp2_files[k]
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(file_path2))[1])[0]
+                filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+
+                with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                    for i in range(0, num_frames, self.chunk_size):
+                        chunk = frames_bp2[k][i:i+self.chunk_size].compute()
+                        for frame in chunk:
+                            tif.write(frame, photometric='minisblack')
+
+    def run(self):      
+        print('Inflating images...')
+        if self.use_roi:
+        # Using ThreadPoolExecutor to parallelize
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                # Submitting tasks to the executor
+                futures = [executor.submit(self.process_k, self.processed_bp1, self.processed_bp2, k) for k in range(len(self.processed_bp1))]
+
+                # Waiting for all tasks to complete (optional)
                 show_progress_bar = False
-            
-            # plane1=sorted([os.path.splitext(os.path.split(os.path.normpath(x))[1])[0] for x in glob.glob(self.path_encoded_bp1)])
-            if self.use_roi:
-                print('Patching in ROI...')
+                try:
+                    get_ipython()
+                    # Since get_ipython didn't raise an exception, we're in an interactive environment.
+                    show_progress_bar = True
+                except NameError:
+                    # We're not in an interactive environment (standard Python interpreter or a standalone script).
+                    show_progress_bar = False
                 if show_progress_bar:
-                    progress_bar1 = tqdm(total=len(self.processed_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
-                    
-                    if self.encoded_bp2 is not None:
-                        progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
-                for k in range(len(self.processed_bp1)):
-                    num_frames = self.processed_bp1[k].shape[0]
-                    file_path= self.encoded_bp1_files[k]
-                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(file_path))[1])[0]
-                    # input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
-                    # input_file_name1 = plane1[k]
-                    filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
-                    # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                    progress_bar = tqdm(total=len(futures), desc="Extracting frames", position=0, leave=True)
+                for future in as_completed(futures):
+                    # Handling exceptions (if any)
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Exception in processing: {e}")
+                    progress_bar.update()
+                progress_bar.close()
+        else:
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                # Submitting tasks to the executor
+                futures = [executor.submit(self.process_k, self.encoded_bp1, self.encoded_bp2, k) for k in range(len(self.encoded_bp1))]
 
-                    with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-                        for i in range(0, num_frames, self.chunk_size):
-                            chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
-                            for frame in chunk:
-                                tif.write(frame, photometric='minisblack')
-                            if show_progress_bar:
-                                progress_bar1.update(self.chunk_size)
-                            gc.collect()
-                    # progress_bar1.close()
-                    if self.encoded_bp2 is not None:
-                        file_path2= self.encoded_bp2_files[k]
-                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(file_path2))[1])[0]
-                        filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
-                        with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-                            progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
-                            for i in range(0, num_frames, self.chunk_size):
-                                chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
-                                for frame in chunk:
-                                    tif.write(frame, photometric='minisblack')
-                                if show_progress_bar:
-                                    progress_bar2.update(self.chunk_size)
-                                gc.collect()
-                                
-                    if show_progress_bar:
-                        progress_bar1.close()
-                        
-                        if self.encoded_bp2 is not None:
-                            progress_bar2.close()
-                    
-                
-            else:
-                print('Extracting background only...')
-                
+                # Waiting for all tasks to complete (optional)
+                show_progress_bar = False
+                try:
+                    get_ipython()
+                    # Since get_ipython didn't raise an exception, we're in an interactive environment.
+                    show_progress_bar = True
+                except NameError:
+                    # We're not in an interactive environment (standard Python interpreter or a standalone script).
+                    show_progress_bar = False
                 if show_progress_bar:
-                    progress_bar1 = tqdm(total=len(self.processed_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
-                    
-                    if self.encoded_bp2 is not None:
-                        progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
-                
-                for k in range(len(self.encoded_bp1)):
-                    num_frames = self.encoded_bp1[k].shape[0]
-                    
-                    file_path= self.encoded_bp1_files[k]
-                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(file_path))[1])[0]
-                    filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
+                    progress_bar = tqdm(total=len(futures), desc="Extracting frames", position=0, leave=True)
+                for future in as_completed(futures):
+                    # Handling exceptions (if any)
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"Exception in processing: {e}")
+                    progress_bar.update()
+                progress_bar.close()
 
-                    with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-                        # progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
-                        for i in range(0, num_frames, self.chunk_size):
-                            chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
-                            for frame in chunk:
-                                tif.write(frame, photometric='minisblack')
-                            if show_progress_bar:
-                                progress_bar1.update(self.chunk_size)
-                            # gc.collect()
-                    # progress_bar.close()
-                    if self.encoded_bp2 is not None:
+        print('Done.')
 
-                        file_path= self.encoded_bp2_files[k]
-                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(file_path))[1])[0]
-
-                        filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
-
-                        with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-                            # progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
-                            for i in range(0, num_frames, self.chunk_size):
-                                chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
-                                for frame in chunk:
-                                    tif.write(frame, photometric='minisblack')
-                                if show_progress_bar:
-                                    progress_bar2.update(self.chunk_size)
-                                # gc.collect()
-                    if show_progress_bar:
-                        progress_bar1.close()
-                        if self.encoded_bp2 is not None:
-                            progress_bar2.close()
-            print('Done.')
             
