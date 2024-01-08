@@ -531,7 +531,17 @@ class SPARZIP:
 
 
 class SPARUNZIP:
-    def __init__(self, path_sparse_bp1:str, path_encoded_bp1:str, stem:str, output_path:str, path_sparse_bp2:str=None, path_encoded_bp2:str=None, use_roi:bool=True, chunk_size:int=10, num_workers:int=4):
+    def __init__(self, path_sparse_bp1:str, 
+                 path_encoded_bp1:str, 
+                 stem:str, 
+                 output_path:str, 
+                 path_sparse_bp2:str=None, 
+                 path_encoded_bp2:str=None, 
+                 use_roi:bool=True, 
+                 chunk_size:int=10, 
+                 num_workers:int=4, 
+                 num_dask_workers:int=2):
+        
         self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
@@ -540,6 +550,7 @@ class SPARUNZIP:
         self.processed_bp1, self.processed_bp2 = self.process_frames()
         self.stem = stem
         self.num_workers = num_workers
+        self.num_dask_workers = num_dask_workers
         if output_path[-1] != '/':
             self.output_path = output_path+"/"
         else:
