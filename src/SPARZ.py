@@ -23,7 +23,6 @@ from dask import delayed
 import ffmpeg
 from dask.diagnostics import ProgressBar
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc
 
 #%%
 class SPARZIP:
@@ -633,6 +632,7 @@ class SPARUNZIP:
 
     def run(self):      
         print('Inflating images...')
+        progress_bar = None  # Initialize progress_bar
         if self.use_roi:
         # Using ThreadPoolExecutor to parallelize
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
@@ -656,8 +656,11 @@ class SPARUNZIP:
                         future.result()
                     except Exception as e:
                         print(f"Exception in processing: {e}")
-                    progress_bar.update()
-                progress_bar.close()
+                    # Check if progress_bar is not None before updating
+                    if progress_bar:
+                        progress_bar.update()
+                if progress_bar:
+                    progress_bar.close()
         else:
             with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
                 # Submitting tasks to the executor
@@ -680,8 +683,11 @@ class SPARUNZIP:
                         future.result()
                     except Exception as e:
                         print(f"Exception in processing: {e}")
-                    progress_bar.update()
-                progress_bar.close()
+                    # Check if progress_bar is not None before updating
+                    if progress_bar:
+                        progress_bar.update()
+                if progress_bar:
+                    progress_bar.close()
 
         print('Done.')
 
