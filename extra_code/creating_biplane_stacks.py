@@ -1,6 +1,6 @@
 import os
 import numpy as np
-from tifffile import TiffFile, imsave
+from tifffile import TiffFile, imwrite
 from natsort import natsorted
 
 
@@ -18,6 +18,7 @@ def load_volume_from_file(folder, filename):
     with TiffFile(os.path.join(folder, filename)) as tif:
         slices = [page.asarray() for page in tif.pages]
         volume = np.stack(slices, axis=0)
+        print(f"Loaded volume from {filename}, shape: {volume.shape}")
     return volume
 
 
@@ -34,57 +35,69 @@ def save_volume_to_file(volume, output_folder, filename):
         None
     """
     output_path = os.path.join(output_folder, filename)
-    imsave(output_path, volume)
+    metadata = {'axes': 'TYX'}
+    imwrite(output_path, volume, metadata=metadata)
     print(f"Saved concatenated volume to {output_path}")
 
 
-def main(folder1, folder2, output_folder):
-    """
-    Main function to load pairs of 3D volumes, concatenate them, and save the concatenated volumes.
+def process_files_in_subfolder(uncompressed_folder, output_folder):
+    '''Process the files in a subfolder of the main folder.'''
+    # Get all files in the uncompressed folder
+    files = os.listdir(uncompressed_folder)
+    files = natsorted(files)  # Sort the files
 
-    Parameters:
-        folder1 (str): Directory containing the first set of TIFF files.
-        folder2 (str): Directory containing the second set of TIFF files.
-        output_folder (str): Directory to save the concatenated TIFF files.
+    # Identify bp1 and bp2 files
+    bp1_file = None
+    bp2_file = None
+    for file in files:
+        if '-250' in file:
+            bp1_file = file
+        elif '+250' in file:
+            bp2_file = file
 
-    Returns:
-        None
-    """
-    # Ensure the output folder exists
-    os.makedirs(output_folder, exist_ok=True)
+    # Check if both files were found
+    if bp1_file is None or bp2_file is None:
+        print(f"Missing files in folder {uncompressed_folder}. Skipping.")
+        return
 
-    # Get the sorted list of image files in the input folders
-    files1 = natsorted(os.listdir(folder1))
-    print(files1)
-    files2 = natsorted(os.listdir(folder2))
-    print(files2)
-    assert len(files1) == len(
-        files2
-    ), "Mismatch in number of files between the two folders."
+    # Load, process, and save the volumes
+    volume1 = load_volume_from_file(uncompressed_folder, bp1_file)
+    volume2 = load_volume_from_file(uncompressed_folder, bp2_file)
 
-    for i, (filename1, filename2) in enumerate(zip(files1, files2)):
-        output_filename = f"concatenated_part_{i}.tiff"
+    # Concatenate and save the volumes
+    concatenated_volume = np.concatenate([volume1, volume2], axis=2)
+    # Define metadata
+    
+    print(f"Concatenated volume shape: {concatenated_volume.shape}")
+    output_filename = "sequence-MT0.N1.HD-BP.tif"
+    save_volume_to_file(concatenated_volume, output_folder, output_filename)
 
-        # Load the 3D volumes
-        volume1 = load_volume_from_file(folder1, filename1)
-        volume2 = load_volume_from_file(folder2, filename2)
 
-        # Ensure the loaded volumes are 3D and have the expected dimensions
-        assert volume1.shape == (250, 245, 245) and volume2.shape == (
-            250,
-            245,
-            245,
-        ), f"Loaded volumes from {filename1} and {filename2} have unexpected shapes: {volume1.shape}, {volume2.shape}"
 
-        # Concatenate the volumes along the y-axis
-        concatenated_volume = np.concatenate([volume1, volume2], axis=2)
+def main(main_folder, output_main_folder):
+    '''Process all subfolders in the main folder.'''
+    # Get all subfolders and sort them naturally
+    subfolders = [f for f in os.listdir(main_folder) if os.path.isdir(os.path.join(main_folder, f))]
+    subfolders = natsorted(subfolders)
 
-        # Save the concatenated volume
-        save_volume_to_file(concatenated_volume, output_folder, output_filename)
+    # Iterate through each subfolder in the main folder
+    for subfolder in subfolders:
+        subfolder_path = os.path.join(main_folder, subfolder)
+
+        # Define the path to the uncompressed folder
+        uncompressed_folder = os.path.join(subfolder_path, 'uncompressed')
+        if not os.path.exists(uncompressed_folder):
+            print(f"Uncompressed folder not found in {subfolder_path}. Skipping.")
+            continue
+
+        # Define the output folder for the concatenated images
+        output_folder = os.path.join(output_main_folder, subfolder)
+        os.makedirs(output_folder, exist_ok=True)
+        # Process the files in the uncompressed folder
+        process_files_in_subfolder(uncompressed_folder, output_folder)
 
 
 if __name__ == "__main__":
-    folder1 = "/Users/laurabreimann/Desktop/input_data/nir_etal_ROI/level_3_kernel_11_relThres_55/BP1"
-    folder2 = "/Users/laurabreimann/Desktop/input_data/nir_etal_ROI/level_3_kernel_11_relThres_55/BP2"
-    output_folder = "/Users/laurabreimann/Desktop/input_data/nir_etal_ROI/level_3_kernel_11_relThres_55/biplane"
-    main(folder1, folder2, output_folder)
+    main_folder = "/Users/laurabreimann/Desktop/microtubule_data"
+    output_main_folder = "/Users/laurabreimann/Desktop/microtubule_data"
+    main(main_folder, output_main_folder)
