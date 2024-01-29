@@ -58,11 +58,11 @@ if not os.path.exists(os.path.join(path+ '/output/')):
     os.makedirs(os.path.join(path+ '/output/'))
 
 # find the raw files and save them seperately
-# raw_files = [file for file in files if 'raw' in file]
-# files = [file for file in files if 'raw' not in file]
+raw_files = [file for file in files if 'raw' in file]
+files = [file for file in files if 'raw' not in file]
     
-raw_files = files[-5]
-files = files[-4:-1]
+# raw_files = files[-5]
+# files = files[-4:-1]
 
 #%%
 # Earth Mover's Distance (EMD) or Wasserstein distance: This metric can be thought of as the minimum amount of "work" required to transform one point cloud into another, where work is measured as point movement times the distance moved.
@@ -288,8 +288,8 @@ def compute_nearest_neighbours(df1, df2, n_neighbors=1, algorithm='ball_tree'):
 
 #%%
 # load raw file
-# raw_dff = h5r_to_df(filepath=raw_files[0])
-raw_dff = h5r_to_df(filepath=raw_files)
+raw_dff = h5r_to_df(filepath=raw_files[0])
+# raw_dff = h5r_to_df(filepath=raw_files)
 
 # filter localizations based on user selected criteria
 raw_df = raw_dff[(raw_dff["fitError_x0"] > 0) & (raw_dff["fitError_x0"] < 30) & (raw_dff["fitError_y0"] > 0) & (raw_dff["fitError_y0"] < 30) & (raw_dff["fitResults_A"] > 5) & (raw_dff["fitResults_A"] < max_accuracy)]
@@ -393,10 +393,17 @@ df_out_new.distance = round(np.log(df_out_new.distance+1),10)
 
 #%%
 # sns.kdeplot(data=df_out_new, hue="codec", bw_adjust=.1, x="distance", color ="codec" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
-sns.histplot(data=df_out_new, hue="codec", x="distance", color ="codec" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
+sns.histplot(data=df_out_new, hue="codec", x="distance", color ="label" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
 plt.axvline(x=40, color='r', linestyle='--', linewidth=2)
 # log y scale
 plt.yscale('log')
+# delete fifuge legend
+plt.legend([],[], frameon=False)
+#facegrid by label
+g = sns.FacetGrid(df_out_new, col="label", hue="label", col_wrap=4, sharex=False, sharey=False)
+g.map_dataframe(sns.histplot, x="distance", fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
+g.add_legend()
+
 # the legend should be outside the plot at the bottom and aligned with the x axis
 # plt.legend(bbox_to_anchor=(0., -0.3, 1., .102), loc='lower center', ncol=3, mode="expand", borderaxespad=0.)
 # plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
@@ -426,7 +433,7 @@ plt.show()
 # %%
 # plot the boxplot of df
 sns.set_theme(style="whitegrid")
-ax = sns.boxplot(x="codec", y="distance", data=df_out)
+ax = sns.boxplot(x="label", y="distance", data=df_out)
 ax.set(yscale="log")
 ax.set_ylabel('Distance (log)')
 plt.axhline(y=40, color='r', linestyle='--', linewidth=2)
@@ -461,7 +468,7 @@ g.add_legend()
 # %%
 
 # facet grid plot
-g = sns.FacetGrid(df_stats_out.dropna(), col="metric", hue="codec", sharey=False)
+g = sns.FacetGrid(df_stats_out.dropna(), col="metric", hue="label", sharey=False)
 g.map_dataframe(sns.stripplot, x="codec", y="value")
 g.add_legend()
 
