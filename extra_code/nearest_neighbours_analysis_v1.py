@@ -38,7 +38,7 @@ path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz
 files = glob.glob(path + '**/*.h5r', recursive = True)
 
 # data name to assign to the output files
-data_name = 'synMT_vs_lev0'
+data_name = 'synMT_vs_raw'
 date = '_20240127'
 
 #### filtering erroneous localizations outputed by PyME ####
@@ -241,6 +241,42 @@ def compute_wasserstein_distance(u, v):
     
     return (wd_x + wd_y + wd_z) / 3
 
+def compute_nearest_neighbours(df1, df2, n_neighbors=1, algorithm='ball_tree'):
+    # Determine the number of rows in each dataframe
+    len_df1 = len(df1)
+    len_df2 = len(df2)
+
+    print(f"Original lengths: df1={len_df1}, df2={len_df2}")
+
+    # If the dataframes have different number of rows
+    if len_df1 != len_df2:
+        # Determine which dataframe is smaller
+        if len_df1 < len_df2:
+            # Pad df1 with dummy rows
+            df1 = pd.concat([df1, pd.DataFrame(np.zeros((len_df2 - len_df1, df1.shape[1])), columns=df1.columns)], ignore_index=True)
+        else:
+            # Pad df2 with dummy rows
+            df2 = pd.concat([df2, pd.DataFrame(np.zeros((len_df1 - len_df2, df2.shape[1])), columns=df2.columns)], ignore_index=True)
+
+    print(f"Padded lengths: df1={len(df1)}, df2={len(df2)}")
+
+    # Compute the nearest neighbors
+    nbrs = NearestNeighbors(n_neighbors=n_neighbors, algorithm=algorithm).fit(df1)
+    distances, indices = nbrs.kneighbors(df2)
+
+    print(f"Distances and indices lengths: distances={len(distances)}, indices={len(indices)}")
+
+    # If df1 was padded, remove the dummy rows from the indices
+    if len_df1 < len_df2:
+        indices = indices[:len_df1]
+    # If df2 was padded, remove the dummy rows from the distances and indices
+    elif len_df1 > len_df2:
+        distances = distances[:len_df2]
+        indices = indices[:len_df2]
+
+    print(f"Final lengths: distances={len(distances)}, indices={len(indices)}")
+
+    return distances, indices
 
 
 # #%%
