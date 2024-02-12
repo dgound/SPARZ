@@ -38,8 +38,8 @@ path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz
 files = glob.glob(path + '**/*.h5r', recursive = True)
 
 # data name to assign to the output files
-data_name = 'synMT_vs_raw'
-date = '_20240127'
+data_name = 'synMT_vs_rawTP'
+date = '_20240207'
 
 #### filtering erroneous localizations outputed by PyME ####
 # Synth data filtering
@@ -337,9 +337,20 @@ for file in tqdm(files):
     # histogram comparison
     hist_comp = histogram_comparison(np.zeros(len(distances_flat)), distances_flat, bins=10, comparison_metric="bhattacharyya")
     hist_comp_to_append = pd.DataFrame({'metric': ['Histogram'], 'codec': [codec_name], 'value': [hist_comp],'label': [codec_label]})
-    # jaccard
+    
+    # jaccard 
     jaccard = compute_jaccard_similarity_manual(df_query.iloc[:,:3].values, raw.values, voxel_size=20)
     jaccard_to_append = pd.DataFrame({'metric': ['Jaccard'], 'codec': [codec_name], 'value': [jaccard],'label': [codec_label]})
+
+    # jaccard RUN BY TIME POINT
+    frames_q = df_query.index
+    frames_raw = raw.index
+    frames = list(set(frames_raw).intersection(frames_q))
+    jaccard_byTime = []
+    for frame in frames:
+        jaccard_byTime.append(compute_jaccard_similarity_manual(df_query.loc[frame].values.reshape(1, -1), raw.loc[frame].values.reshape(1, -1), voxel_size=20))
+    jaccard_byTime_to_append = pd.DataFrame({'metric': ['Jaccard_byTime'], 'codec': [codec_name], 'value': [jaccard_byTime],'label': [codec_label]})
+
     # wasserstein
     wasserstein = compute_wasserstein_distance(df_query.iloc[:,:3], raw)
     wasserstein_to_append = pd.DataFrame({'metric': ['Wasserstein coordinates'], 'codec': [codec_name], 'value': [wasserstein],'label': [codec_label]})
@@ -349,7 +360,7 @@ for file in tqdm(files):
     wasserstein_dist_to_append = pd.DataFrame({'metric': ['Wasserstein NN distances'], 'codec': [codec_name], 'value': [wasserstein_dist],'label': [codec_label]})
 
     # append the metrics to the df
-    df_stats_out = pd.concat([df_stats_out, jaccard_to_append, wasserstein_to_append, wasserstein_dist_to_append, hist_comp_to_append], ignore_index=True)
+    df_stats_out = pd.concat([df_stats_out, jaccard_to_append, jaccard_byTime_to_append, wasserstein_to_append, wasserstein_dist_to_append, hist_comp_to_append], ignore_index=True)
 
     # make 2d plot of the localizations colored by the distance with plotly
     fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distances', color_continuous_scale='viridis', opacity=0.6, title = data_name+ date +'_'+ codec_label)
