@@ -363,6 +363,12 @@ class SPARZIP:
 
     def deflate(self):
         print('Deflating images...')
+        show_progress_bar = False
+        try:
+            get_ipython()
+            show_progress_bar = True
+        except NameError:
+            show_progress_bar = False
         with dask.config.set(scheduler='threads'):
             # Prepare a list to store delayed operations
             saves = []
@@ -376,14 +382,16 @@ class SPARZIP:
                     saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
                     # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
-            progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
+            if show_progress_bar:
+                progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
             
             for i in range(0, len(saves), self.batch_size):
                 batch = saves[i:i+self.batch_size]
                 dask.compute(*batch, scheduler='threads',num_workers=self.num_workers)
-
-                progress_bar.update(self.batch_size)
-            progress_bar.close()
+                if show_progress_bar:
+                    progress_bar.update(self.batch_size)
+            if show_progress_bar:
+                progress_bar.close()
         end = time.time()
         
 
@@ -414,14 +422,12 @@ class SPARZIP:
                                                 'vcodec': 'libx265',
                                                 'crf': '0',
                                                 'pix_fmt': 'gray16le',
-                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             },
                                 2:{
                                                 'vcodec': 'libx265',
                                                 'crf': '5',
                                                 'pix_fmt': 'gray16le',
-                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             },
 
@@ -429,7 +435,6 @@ class SPARZIP:
                                                 'vcodec': 'libx265',
                                                 'crf': '15',
                                                 'pix_fmt': 'gray16le',
-                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             }                                      
                                             
@@ -438,28 +443,30 @@ class SPARZIP:
         elif codec == 'av1':
             compression_levels = {0: {
                                                 'vcodec': 'libaom-av1',
-                                                'pix_fmt': 'gray16le',
-                                                'channels': '1',
-                                                'x265-params': 'lossless=1',
-                                            },
-                                1:{
-                                                'vcodec': 'libaom-av1',
+                                                'pix_fmt': 'gray16le', 
+                                                'strict': 'experimental',
                                                 'crf': '0',
-                                                'pix_fmt': 'gray16le',
-                                                'channels': '1'
-                                            },
-                                2:{
+                                                'fps_mode': 'vfr'
+                                }
+,
+                                1:{
                                                 'vcodec': 'libaom-av1',
                                                 'crf': '5',
                                                 'pix_fmt': 'gray16le',
-                                                'channels': '1'
+                                                'fps_mode': 'vfr'
+                                            },
+                                2:{
+                                                'vcodec': 'libaom-av1',
+                                                'crf': '15',
+                                                'pix_fmt': 'gray16le',
+                                                'fps_mode': 'vfr'
                                             },
 
                                 3:{
                                                 'vcodec': 'libaom-av1',
-                                                'crf': '15',
+                                                'crf': '25',
                                                 'pix_fmt': 'gray16le',
-                                                'channels': '1'
+                                                'fps_mode': 'vfr'
                                             }                                      
                                             
                                             
@@ -467,7 +474,12 @@ class SPARZIP:
         else:
             raise ValueError(f'Unsupported codec: {codec}. Supported codecs are x265 and av1.')
         print('Compressing video...')
-        
+        show_progress_bar = False
+        try:
+            get_ipython()
+            show_progress_bar = True
+        except NameError:
+            show_progress_bar = False
         # Process videos using delayed
         writes = []
         for k in range(len(self.processed_bp1)):
@@ -494,7 +506,10 @@ class SPARZIP:
                 ))
 
         # Execute the delayed writes
-        with ProgressBar():
+        if show_progress_bar:
+            with ProgressBar():
+                compute(*writes, scheduler='threads',num_workers=self.num_workers)
+        else:
             compute(*writes, scheduler='threads',num_workers=self.num_workers)
 
     def write_frames_to_video(self, bp1_block, video_name, writer_args):
@@ -509,7 +524,7 @@ class SPARZIP:
             'format': 'rawvideo',
             'pix_fmt': 'gray16le',
             's': f'{bp1_frames.shape[2]}x{bp1_frames.shape[1]}',
-            'y': None
+            'y': None,
             # 's': '{}x{}'.format(*input_frames.shape[1:3][[::-1]])
         }
 
@@ -606,83 +621,89 @@ class SPARUNZIP:
     #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
     #     tifffile.imwrite(filename, arr, photometric='minisblack')
     #     return arr
-    
-    def process_k(self,frames_bp1, frames_bp2, k):
-        with dask.config.set(scheduler='threads', num_workers=self.num_dask_workers):
-            num_frames = frames_bp1[k].shape[0]
-            file_path = self.encoded_bp1_files[k]
-            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(file_path))[1])[0]
-            filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
 
-            with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-                for i in range(0, num_frames, self.chunk_size):
-                    chunk = frames_bp1[k][i:i+self.chunk_size].compute()
-                    for frame in chunk:
-                        tif.write(frame, photometric='minisblack')
+    def run(self):
+        print('Inflating images...')
+        show_progress_bar = False
+        try:
+            get_ipython()
+            show_progress_bar = True
+        except NameError:
+            show_progress_bar = False
+        if self.use_roi:
+            print('Patching in ROI...')
+            if show_progress_bar:
+                    progress_bar1 = tqdm(total=len(self.processed_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
+                    if self.encoded_bp2 is not None:
+                        progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 1", position=0, leave=True)
+            for k in range(len(self.processed_bp1)):
+                num_frames = self.processed_bp1[k].shape[0]
 
-            if frames_bp2 is not None:
-                file_path2 = self.encoded_bp2_files[k]
-                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(file_path2))[1])[0]
-                filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
+                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
 
-                with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+
                     for i in range(0, num_frames, self.chunk_size):
-                        chunk = frames_bp2[k][i:i+self.chunk_size].compute()
+                        chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                         for frame in chunk:
                             tif.write(frame, photometric='minisblack')
-
-    def run(self):      
-        print('Inflating images...')
-        if self.use_roi:
-        # Using ThreadPoolExecutor to parallelize
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                # Submitting tasks to the executor
-                futures = [executor.submit(self.process_k, self.processed_bp1, self.processed_bp2, k) for k in range(len(self.processed_bp1))]
-
-                # Waiting for all tasks to complete (optional)
-                show_progress_bar = False
-                try:
-                    get_ipython()
-                    # Since get_ipython didn't raise an exception, we're in an interactive environment.
-                    show_progress_bar = True
-                except NameError:
-                    # We're not in an interactive environment (standard Python interpreter or a standalone script).
-                    show_progress_bar = False
+                        if show_progress_bar:
+                            progress_bar1.update(self.chunk_size)
                 if show_progress_bar:
-                    progress_bar = tqdm(total=len(futures), desc="Extracting frames", position=0, leave=True)
-                for future in as_completed(futures):
-                    # Handling exceptions (if any)
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"Exception in processing: {e}")
-                    progress_bar.update()
-                progress_bar.close()
-        else:
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                # Submitting tasks to the executor
-                futures = [executor.submit(self.process_k, self.encoded_bp1, self.encoded_bp2, k) for k in range(len(self.encoded_bp1))]
-
-                # Waiting for all tasks to complete (optional)
-                show_progress_bar = False
-                try:
-                    get_ipython()
-                    # Since get_ipython didn't raise an exception, we're in an interactive environment.
-                    show_progress_bar = True
-                except NameError:
-                    # We're not in an interactive environment (standard Python interpreter or a standalone script).
-                    show_progress_bar = False
-                if show_progress_bar:
-                    progress_bar = tqdm(total=len(futures), desc="Extracting frames", position=0, leave=True)
-                for future in as_completed(futures):
-                    # Handling exceptions (if any)
-                    try:
-                        future.result()
-                    except Exception as e:
-                        print(f"Exception in processing: {e}")
-                    progress_bar.update()
-                progress_bar.close()
-
-        print('Done.')
-
+                    progress_bar1.close()
+                if self.encoded_bp2 is not None:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                    with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        if show_progress_bar:
+                            progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
+                        for i in range(0, num_frames, self.chunk_size):
+                            chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                            for frame in chunk:
+                                tif.write(frame, photometric='minisblack')
+                            if show_progress_bar:
+                                progress_bar2.update(self.chunk_size)
+                    if show_progress_bar:
+                        progress_bar2.close()
+                
             
+        else:
+            print('Extracting background only...')
+            
+            for k in range(len(self.encoded_bp1)):
+                num_frames = self.encoded_bp1[k].shape[0]
+
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
+                # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+
+                with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
+                    if show_progress_bar:
+                        progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
+                    for i in range(0, num_frames, self.chunk_size):
+                        chunk = self.encoded_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                        for frame in chunk:
+                            tif.write(frame, photometric='minisblack')
+                        if show_progress_bar:
+                            progress_bar.update(self.chunk_size)
+                if show_progress_bar:
+                    progress_bar.close()
+                if self.encoded_bp2 is not None:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                    with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
+                        if show_progress_bar:
+                            progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
+                        for i in range(0, num_frames, self.chunk_size):
+                            chunk = self.encoded_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                            for frame in chunk:
+                                tif.write(frame, photometric='minisblack')
+                            if show_progress_bar:
+                                progress_bar.update(self.chunk_size)
+                    if show_progress_bar:
+                        progress_bar.close()
+        print('Done.')
