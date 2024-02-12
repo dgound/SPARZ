@@ -1,3 +1,11 @@
+"""
+This script runs a grid search over the parameters of SPARZ (kernel size, relative threshold, compression level).
+It uses the SPARZIP and SPARUNZIP classes from SPARZ.py.
+
+"""
+
+
+
 from SPARZ import SPARZIP, SPARUNZIP
 import os
 from tqdm import tqdm
@@ -9,7 +17,7 @@ path2 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-s
 stem= 'MT0'
 
 # Define ranges for grid search
-kernel_sizes = range(5, 12, 2)  # 5, 7, 9, 11
+kernel_sizes =  range(5, 12, 2) #  5, 7, 9, 11 
 rel_thresholds = [0.35, 0.45, 0.55, 0.65]  # 0.35, 0.45, 0.55, 0.65
 compression_levels = [0, 1, 2, 3]  # 0, 1, 2, 3
 
@@ -35,8 +43,7 @@ with tqdm(total=total_iterations, desc="Grid Search Progress", unit="iteration")
 
                 # SPARZIP
                 z = SPARZIP(path1, stem, output_path, path2, relative_threshold = rel_thresh, kernel_size =kernel_size)
-    
-                z.run(compression_level=compression_level)
+                z.run(codec='x265', compression_level=compression_level)
 
                 # Output files for SPARUNZIP
                 path_sparse_bp1 = os.path.join(output_path, f'{base_filename1}.npz')
@@ -57,3 +64,5 @@ with tqdm(total=total_iterations, desc="Grid Search Progress", unit="iteration")
 
                 # Update progress bar
                 pbar.update(1)
+
+

@@ -1,13 +1,12 @@
-#%%
+#%% Import all the necessary packages
 import pandas as pd
 import os
-# from sklearn.neighbors import NearestNeighbors
 import matplotlib.pyplot as plt
 import numpy as np
 import sys
 # sys.path.append('/Users/alioutas/Library/CloudStorage/GoogleDrive-alioutas@gmail.com/My Drive/GitHub/SPARZ3/extra_code')
 from h5r_functions import h5r_to_df
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor #DELETE THIS
 from scipy.spatial import distance
 from glob import glob
 import seaborn as sns
@@ -15,13 +14,57 @@ import multiprocessing
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.stats import entropy
-# from joblib import Parallel, delayed
 from tqdm import tqdm
 import glob
+from scipy.stats import wasserstein_distance
+from sklearn.neighbors import NearestNeighbors
+
+
+
+
+
 
 #%%
-from scipy.stats import wasserstein_distance
+#####################################################################
+################## User defined parameters ##########################
+#####################################################################
 
+# select the path of the data folder
+# path = '/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/'
+path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz_grid_search/'
+
+# find all .h5r files within the folder
+
+files = glob.glob(path + '**/*.h5r', recursive = True)
+
+# data name to assign to the output files
+data_name = 'synMT_vs_rawTP'
+date = '_20240207'
+
+#### filtering erroneous localizations outputed by PyME ####
+# Synth data filtering
+max_accuracy = 100000
+
+# Nir et al data filtering
+# max_accuracy = 1000000
+
+# Distance threshold to calculate nearest neighbours, we used 40nm because this is the resolution of SMLM method
+dist_threshold = 40
+
+#%% Define all functions
+
+#Check if there is an output folder, and if there isnt then create one
+if not os.path.exists(os.path.join(path+ '/output/')):
+    os.makedirs(os.path.join(path+ '/output/'))
+
+# find the raw files and save them seperately
+raw_files = [file for file in files if 'raw' in file]
+files = [file for file in files if 'raw' not in file]
+    
+# raw_files = files[-5]
+# files = files[-4:-1]
+
+#%%
 # Earth Mover's Distance (EMD) or Wasserstein distance: This metric can be thought of as the minimum amount of "work" required to transform one point cloud into another, where work is measured as point movement times the distance moved.
 def compute_wasserstein_distance_1D(u, v):
     u = u.values if isinstance(u, pd.DataFrame) else u
@@ -185,7 +228,6 @@ def histogram_comparison(distances_raw, distances_condition, bins=30, comparison
     else:
         raise ValueError("Invalid comparison_metric. Choose either 'bhattacharyya' or 'kl_divergence'.")
 
-from scipy.stats import wasserstein_distance
 
 # Earth Mover's Distance (EMD) or Wasserstein distance: This metric can be thought of as the minimum amount of "work" required to transform one point cloud into another, where work is measured as point movement times the distance moved.
 def compute_wasserstein_distance(u, v):
@@ -198,42 +240,6 @@ def compute_wasserstein_distance(u, v):
     wd_z = wasserstein_distance(u[:, 2], v[:, 2])
     
     return (wd_x + wd_y + wd_z) / 3
-
-
-
-#%%
-# Determine the number of available cores and use % of them for the NN analysis
-num_cores = multiprocessing.cpu_count()
-num_cores = int(round(num_cores * 0.9, 0))
-
-print('Will be using',num_cores, 'cores')
-
-#%%
-
-# def compute_single_row(row, gt, n_neighbors):
-#     distances = np.array([distance.euclidean(row, gt_row) for gt_row in gt.values])
-#     sorted_indices = np.argsort(distances)
-#     return distances[sorted_indices[:n_neighbors]], sorted_indices[:n_neighbors]
-
-# def compute_nearest_neighbours_parallel(df, gt, n_neighbors=1, n_jobs=-1):
-#     # Initialize arrays to hold the results
-#     min_distances = np.zeros((df.shape[0], n_neighbors))
-#     min_indices = np.zeros((df.shape[0], n_neighbors), dtype=int)
-
-#     # Compute the minimum distances and indices for each row in df
-#     results = Parallel(n_jobs=n_jobs)(delayed(compute_single_row)(row, gt, n_neighbors) for _, row in df.iterrows())
-
-#     # Assign the results to the arrays
-#     for i, (distances, indices) in enumerate(results):
-#         min_distances[i] = distances
-#         min_indices[i] = indices
-
-#     return min_distances, min_indices
-
-#%%
-from sklearn.neighbors import NearestNeighbors
-import pandas as pd
-import numpy as np
 
 def compute_nearest_neighbours(df1, df2, n_neighbors=1, algorithm='ball_tree'):
     # Determine the number of rows in each dataframe
@@ -273,39 +279,19 @@ def compute_nearest_neighbours(df1, df2, n_neighbors=1, algorithm='ball_tree'):
     return distances, indices
 
 
+# #%%
+# # Determine the number of available cores and use % of them for the NN analysis
+# num_cores = multiprocessing.cpu_count() -2
+# num_cores = int(round(num_cores * 0.9, 0))
 
-
-#%%
-# find all files in a directory .h5r with glob but do not include the raw files
-# path = '/Users/alioutas/Dropbox (HMS)/data_compression/data_compression_localizations/Nir_et_al/' #Nir_et_al #simulated_tubulin_data
-path = '/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/'
-files = glob.glob(path + '**/*.h5r')
-# data name for naming the output files
-data_name = 'nir_etal_vs_raw'
-date = '_20230922'
-# find the raw files and save them seperately
-raw_files = [file for file in files if 'raw_16bit' in file]
-files = [file for file in files if 'raw_16bit' not in file]
-# raw_files = '/Users/alioutas/Dropbox (HMS)/data_compression/Nir_et_al Laura Breimann/raw/Nir_et_al_thres-12_deb-8_syn-PSF.h5r'
-
-# DELETE THIS
-files = files[1:]
-
-#Check if there is an output folder, and if there isnt then create one
-if not os.path.exists(os.path.join(path+ '/output/')):
-    os.makedirs(os.path.join(path+ '/output/'))
-
+# print('Will be using',num_cores, 'cores')
 
 #%%
 # load raw file
 raw_dff = h5r_to_df(filepath=raw_files[0])
+# raw_dff = h5r_to_df(filepath=raw_files)
 
-# Synth data filtering
-# max_accuracy = 100000
-
-# Nir et al data filtering
-max_accuracy = 1000000
-
+# filter localizations based on user selected criteria
 raw_df = raw_dff[(raw_dff["fitError_x0"] > 0) & (raw_dff["fitError_x0"] < 30) & (raw_dff["fitError_y0"] > 0) & (raw_dff["fitError_y0"] < 30) & (raw_dff["fitResults_A"] > 5) & (raw_dff["fitResults_A"] < max_accuracy)]
 
 
@@ -326,7 +312,7 @@ fig.show()
 # DF COMPRESSED create an empty dataframe to save the results
 df_out = pd.DataFrame(columns=['distance', 'codec', 'label'])
 df_stats_out = pd.DataFrame(columns=['metric', 'codec', 'label', 'value'])
-dist_threshold = 40
+
 
 # loop over the files and compute the nearest neighbours
 for file in tqdm(files):
@@ -341,8 +327,9 @@ for file in tqdm(files):
     df_query['distances'] = distances.flatten()
     distances_flat = distances.flatten()
     distances_flat = distances_flat[~np.isnan(distances_flat)]
-    codec_label = os.path.basename(os.path.dirname(file))
-    codec_name = os.path.basename(os.path.dirname(file)) + '_' + data_name + date
+
+    codec_label = os.path.basename(os.path.dirname(os.path.dirname(file)))
+    codec_name = codec_label + '_' + data_name + date
     df_to_append = pd.DataFrame({'distance': distances_flat, 'codec': [codec_name]*len(distances_flat),'label': [codec_label]*len(distances_flat)})
     df_out = pd.concat([df_out, df_to_append], ignore_index=True)
 
@@ -350,9 +337,20 @@ for file in tqdm(files):
     # histogram comparison
     hist_comp = histogram_comparison(np.zeros(len(distances_flat)), distances_flat, bins=10, comparison_metric="bhattacharyya")
     hist_comp_to_append = pd.DataFrame({'metric': ['Histogram'], 'codec': [codec_name], 'value': [hist_comp],'label': [codec_label]})
-    # jaccard
+    
+    # jaccard 
     jaccard = compute_jaccard_similarity_manual(df_query.iloc[:,:3].values, raw.values, voxel_size=20)
     jaccard_to_append = pd.DataFrame({'metric': ['Jaccard'], 'codec': [codec_name], 'value': [jaccard],'label': [codec_label]})
+
+    # jaccard RUN BY TIME POINT
+    frames_q = df_query.index
+    frames_raw = raw.index
+    frames = list(set(frames_raw).intersection(frames_q))
+    jaccard_byTime = []
+    for frame in frames:
+        jaccard_byTime.append(compute_jaccard_similarity_manual(df_query.loc[frame].values.reshape(1, -1), raw.loc[frame].values.reshape(1, -1), voxel_size=20))
+    jaccard_byTime_to_append = pd.DataFrame({'metric': ['Jaccard_byTime'], 'codec': [codec_name], 'value': [jaccard_byTime],'label': [codec_label]})
+
     # wasserstein
     wasserstein = compute_wasserstein_distance(df_query.iloc[:,:3], raw)
     wasserstein_to_append = pd.DataFrame({'metric': ['Wasserstein coordinates'], 'codec': [codec_name], 'value': [wasserstein],'label': [codec_label]})
@@ -362,135 +360,32 @@ for file in tqdm(files):
     wasserstein_dist_to_append = pd.DataFrame({'metric': ['Wasserstein NN distances'], 'codec': [codec_name], 'value': [wasserstein_dist],'label': [codec_label]})
 
     # append the metrics to the df
-    df_stats_out = pd.concat([df_stats_out, jaccard_to_append, wasserstein_to_append, wasserstein_dist_to_append, hist_comp_to_append], ignore_index=True)
+    df_stats_out = pd.concat([df_stats_out, jaccard_to_append, jaccard_byTime_to_append, wasserstein_to_append, wasserstein_dist_to_append, hist_comp_to_append], ignore_index=True)
 
     # make 2d plot of the localizations colored by the distance with plotly
-    fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distances', color_continuous_scale='viridis', opacity=0.6, title = data_name+ date +'_'+ os.path.basename(os.path.dirname(file)))
+    fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distances', color_continuous_scale='viridis', opacity=0.6, title = data_name+ date +'_'+ codec_label)
     fig.update_traces(marker=dict(size=1))
     fig.update_layout(legend= {'itemsizing': 'constant'})
     # save plot to file
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations.png'), width=800, height=800, scale=2)
+    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations.png'), width=800, height=800, scale=2)
     fig.show()
 
     # plot that colors the localizations based on the distance threshold
     df_query['distance_threshold'] = np.where(df_query['distances'] > dist_threshold, '>'+str(dist_threshold), '<'+str(dist_threshold))
-    fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distance_threshold', opacity=0.6, title = data_name+ date +'_'+ os.path.basename(os.path.dirname(file)), color_discrete_sequence=["grey", "red"])
+    fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distance_threshold', opacity=0.6, title = data_name+ date +'_'+ codec_label, color_discrete_map={">40": "red", "<40": "grey"})
     fig.update_traces(marker=dict(size=1))
     fig.update_layout(legend= {'itemsizing': 'constant'})
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
+    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
     fig.show()
-    df_query.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
+    df_query.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
 
 # save df_out to csv
-df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_distances.csv'), index=False)
+df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'), index=False)
 # count the number of localizations per codec
-df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_n_loc.csv'), index=False)
+df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_n_loc.csv'), index=False)
 
 # save df_stats_out to csv
-df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(file))+'_metrics.csv'), index=False)
-
-
-
-
-#%%
-# DF RAW create an empty dataframe to save the results
-df_out = pd.DataFrame(columns=['distance', 'codec', 'label'])
-df_stats_out = pd.DataFrame(columns=['metric', 'codec','label', 'value'])
-dist_threshold = 40
-
-# loop over the files and compute the nearest neighbours
-for file in tqdm(files):
-    # df_out_temp = pd.DataFrame(columns=['distance', 'codec'])
-    locs = h5r_to_df(filepath=file)
-    # getting unique time indexes 
-    # time_indexes = locs['tIndex'].unique()
-
-    # # iterate over unique time indexes
-    # for t_index in time_indexes:
-    #     locs_tindex = locs[locs['tIndex']==t_index]
-    #     print(f"Processing tIndex={t_index}, number of localizations: {locs_tindex.shape[0]}")
-
-    #     # filter localizations based on selected criteria
-    #     locs_tindex = locs_tindex[(locs_tindex["fitError_x0"] > 0) & (locs_tindex["fitError_x0"] < 30) & \
-    #                             (locs_tindex["fitError_y0"] > 0) & (locs_tindex["fitError_y0"] < 30) & \
-    #                             (locs_tindex["fitResults_A"] > 5) & (locs_tindex["fitResults_A"] < max_accuracy)]
-    
-    #     df_query = locs_tindex.reset_index()[col_select]
-
-    #     # compute nearest neighbours
-    #     distances, indices = compute_nearest_neighbours(df_query, raw.iloc[:, :3], n_neighbors=1)
-    #     raw['distances'] = distances.flatten()
-    #     distances_flat = distances.flatten()
-    #     distances_flat = distances_flat[~np.isnan(distances_flat)]
-    print(os.path.basename(file), "has", locs.shape[0], "localizations")
-    # apply universal filter of localizations as this seems to be an issue created during localization with PyME
-    locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < max_accuracy)]
-    df_query = locs.reset_index()[col_select]
-    # distances, indices = compute_nearest_neighbours_parallel(df_query, raw, n_neighbors=1, n_jobs=num_cores)
-    distances, indices = compute_nearest_neighbours(df_query,raw.iloc[:,:3], n_neighbors=1)
-    raw['distances'] = distances.flatten()
-    distances_flat = distances.flatten()
-    distances_flat = distances_flat[~np.isnan(distances_flat)]
-    codec_label = os.path.basename(os.path.dirname(file))
-    codec_name = os.path.basename(os.path.dirname(file)) + '_' + data_name + date
-    df_to_append = pd.DataFrame({'distance': distances_flat, 'codec': [codec_name]*len(distances_flat),'label': [codec_label]*len(distances_flat)})
-    df_out = pd.concat([df_out, df_to_append], ignore_index=True)
-
-    # compute the metrics
-    # histogram comparison
-    hist_comp = histogram_comparison(np.zeros(len(distances_flat)), distances_flat, bins=10, comparison_metric="bhattacharyya")
-    hist_comp_to_append = pd.DataFrame({'metric': ['Histogram'], 'codec': [codec_name], 'value': [hist_comp],'label': [codec_label]})
-    # jaccard
-    jaccard = compute_jaccard_similarity_manual(raw.iloc[:,:3].values, df_query.values, voxel_size=20)
-    jaccard_to_append = pd.DataFrame({'metric': ['Jaccard'], 'codec': [codec_name], 'value': [jaccard],'label': [codec_label]})
-    # wasserstein
-    wasserstein = compute_wasserstein_distance(raw.iloc[:,:3], df_query)
-    wasserstein_to_append = pd.DataFrame({'metric': ['Wasserstein coordinates'], 'codec': [codec_name], 'value': [wasserstein],'label': [codec_label]})
-    
-    zeros = np.zeros(len(distances_flat))
-    wasserstein_dist = compute_wasserstein_distance_1D(zeros, distances.flatten())
-    wasserstein_dist_to_append = pd.DataFrame({'metric': ['Wasserstein NN distances'], 'codec': [codec_name], 'value': [wasserstein_dist],'label': [codec_label]})
-
-    # append the metrics to the df
-    df_stats_out = pd.concat([df_stats_out, jaccard_to_append, wasserstein_to_append, wasserstein_dist_to_append, hist_comp_to_append], ignore_index=True)
-
-    # make 2d plot of the localizations colored by the distance with plotly
-    fig = px.scatter(raw, x='fitResults_x0', y='fitResults_y0', color='distances', color_continuous_scale='viridis', opacity=0.6, title = data_name+ date +'_'+ os.path.basename(os.path.dirname(file)))
-    fig.update_traces(marker=dict(size=1))
-    fig.update_layout(legend= {'itemsizing': 'constant'})
-    # save plot to file
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations.png'), width=800, height=800, scale=2)
-    fig.show()
-
-    # plot that colors the localizations based on the distance threshold
-    raw['distance_threshold'] = np.where(raw['distances'] > dist_threshold, '>'+str(dist_threshold), '<'+str(dist_threshold))
-    fig = px.scatter(raw, x='fitResults_x0', y='fitResults_y0', color='distance_threshold', opacity=0.6, title = data_name+ date +'_'+ os.path.basename(os.path.dirname(file)), color_discrete_sequence=["grey", "red"])
-    fig.update_traces(marker=dict(size=1))
-    fig.update_layout(legend= {'itemsizing': 'constant'})
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
-    fig.show()
-    raw.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ os.path.basename(os.path.dirname(file))+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
-
-
-# save df_out to csv
-df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_distances.csv'), index=False)
-# count the number of localizations per codec
-df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_n_loc.csv'), index=False)
-
-# save df_stats_out to csv
-df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(file))+'_metrics.csv'), index=False)
-
-
-
-#%%
-# # save df_out to csv
-# df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_distances.csv'), index=False)
-# # count the number of localizations per codec
-# df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(os.path.dirname(file))+'_n_loc.csv'), index=False)
-
-# # save df_stats_out to csv
-# df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(file))+'_metrics.csv'), index=False)
-
+df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'), index=False)
 
 
 
@@ -498,14 +393,9 @@ df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.
 # read in saved dataframes
 #####################################################################
 #%%
-import pandas as pd
+df_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'))
+df_stats_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'))
 
-df_out = pd.read_csv('/Users/dimos/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_distances.csv')
-# df_stats_out = pd.read_csv('/Users/dimos/nir_etal_vs_raw_by_time_20230918_sparz_lev1_k11_rt55_metrics.csv')
-
-#%%
-df_out
-df_stats_out
 # %%
 # plot kdeplot as a histogram of the distances
 sns.set_theme(style="whitegrid")
@@ -514,42 +404,34 @@ df_out_new.distance = round(np.log(df_out_new.distance+1),10)
 
 #%%
 # sns.kdeplot(data=df_out_new, hue="codec", bw_adjust=.1, x="distance", color ="codec" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
-sns.histplot(data=df_out_new, hue="codec", x="distance", color ="codec" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
+sns.histplot(data=df_out_new, hue="codec", x="distance", color ="label" , fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
 plt.axvline(x=40, color='r', linestyle='--', linewidth=2)
 # log y scale
 plt.yscale('log')
+# delete fifuge legend
+plt.legend([],[], frameon=False)
+#facegrid by label
+g = sns.FacetGrid(df_out_new, col="label", hue="label", col_wrap=4, sharex=False, sharey=False)
+g.map_dataframe(sns.histplot, x="distance", fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
+g.add_legend()
+
 # the legend should be outside the plot at the bottom and aligned with the x axis
 # plt.legend(bbox_to_anchor=(0., -0.3, 1., .102), loc='lower center', ncol=3, mode="expand", borderaxespad=0.)
 # plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
 # save plot
 # plt.savefig(os.path.join(os.getcwd()+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(files[0])) + '_kdeplot.png'), dpi=300)
-plt.savefig(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(files[0])) + '_kdeplot.png'), dpi=300)
+plt.savefig(os.path.join(path+ '/output/', data_name+ date +'_'+os.path.basename(os.path.dirname(os.path.dirname(files[0]))) + '_kdeplot.png'), dpi=300)
 
 
 #%%
 # make a kde plot that seperates the different codecs in different subplots
-g = sns.FacetGrid(df_out_new, col="codec", hue="codec", col_wrap=3, sharex=False, sharey=False)
+g = sns.FacetGrid(df_out_new, col="codec", hue="codec", col_wrap=4, sharex=False, sharey=False)
 g.map_dataframe(sns.kdeplot, x="distance", bw_adjust=.1, fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=True)
 g.add_legend()
 
 #%%
-# make a histogram plot that seperates the different codecs in different subplots with matplot lib
-import matplotlib.pyplot as plt
-import numpy as np
 
-# create a figure with 3 subplots and shared x and y axes
-fig, axs = plt.subplots(1, 3, sharex=True, sharey=True, tight_layout=True)
-
-
-
-#%%
-df_out.groupby('codec').count()
-
-#%%
-import seaborn as sns
-import matplotlib.pyplot as plt
-
-coded_to_use = 'x265_nir_etal_vs_raw_by_time_20230918'
+coded_to_use = 'sparz_k11_rt35_lev3_synMT_vs_raw_20240127'
 filtered_data = df_out_new[df_out_new['codec'] == coded_to_use]
 sns.histplot(data=filtered_data, x="distance", fill=False, common_norm=True, alpha=.4, linewidth=2, log_scale=False)
 plt.axvline(x=40, color='r', linestyle='--', linewidth=2)
@@ -562,7 +444,7 @@ plt.show()
 # %%
 # plot the boxplot of df
 sns.set_theme(style="whitegrid")
-ax = sns.boxplot(x="codec", y="distance", data=df_out)
+ax = sns.boxplot(x="label", y="distance", data=df_out)
 ax.set(yscale="log")
 ax.set_ylabel('Distance (log)')
 plt.axhline(y=40, color='r', linestyle='--', linewidth=2)
@@ -595,10 +477,9 @@ g.add_legend()
 
 
 # %%
-import seaborn as sns
 
 # facet grid plot
-g = sns.FacetGrid(df_stats_out.dropna(), col="metric", hue="codec", sharey=False)
+g = sns.FacetGrid(df_stats_out.dropna(), col="metric", hue="label", sharey=False)
 g.map_dataframe(sns.stripplot, x="codec", y="value")
 g.add_legend()
 
@@ -710,15 +591,13 @@ def histogram_comparison(distances_raw, distances_condition, bins=30, comparison
     else:
         raise ValueError("Invalid comparison_metric. Choose either 'bhattacharyya' or 'kl_divergence'.")
 # %%
-import numpy as np
+
 df_zeros = pd.DataFrame(np.zeros((217474, 1)), columns=['distance'])
 hc_1d = df_out.groupby('codec').apply(lambda x: histogram_comparison(df_zeros['distance'].values, x['distance'].values, bins=30, comparison_metric="bhattacharyya"))
 hc_1d = pd.DataFrame(wd_1d)
 hc_1d.columns = ['value']
 # %%
-# create dotplot of the metrics
-import seaborn as sns
-import matplotlib.pyplot as plt
+
 
 sns.set_theme(style="whitegrid")
 ax = sns.stripplot(x="codec", y="value", hue="codec", data=hc_1d, dodge=True, size=15)

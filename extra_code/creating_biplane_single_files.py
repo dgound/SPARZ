@@ -1,4 +1,23 @@
-# This script is used to create biplane images from two matching single plane images in subfolders of many images.
+"""
+ This script is used to create biplane images from two matching single plane images in subfolders of many images.
+
+    The script assumes that the images are in a folder structure like this:
+        main_folder
+            subfolder1
+                uncompressed
+                    image1_bp1.tif
+                    image1_bp2.tif
+                    image2_bp1.tif
+                    image2_bp2.tif
+                    ... 
+            
+                    
+    The script will create a new folder 'uncompressed_biplane' in each subfolder and save the concatenated images there.
+    The script will also copy the metadata from one of the source images to the concatenated image.
+    The script will remove '_bp1' or '_bp2' from the filename for the output file.
+
+ 
+""" 
 
 import os
 import cv2
@@ -16,7 +35,7 @@ def concat_images(image_pair):
 
 
 # Path to the folder containing subfolders with images
-main_folder = '/Users/laurabreimann/Desktop/microtubule_data/'
+main_folder = '/Users/laurabreimann/Desktop/microtubule_data'
 
 
 # Iterate over each subfolder in the main folder

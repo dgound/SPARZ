@@ -23,7 +23,6 @@ from dask import delayed
 import ffmpeg
 from dask.diagnostics import ProgressBar
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import gc
 
 #%%
 class SPARZIP:
@@ -414,27 +413,30 @@ class SPARZIP:
             ctu_size = self.determine_ctu_size(w, h)
             compression_levels = {0: {
                                                 'vcodec': 'libx265',
-                                                'pix_fmt': 'gray16le',
+                                                'pix_fmt': 'gray12le',
                                                 'channels': '1',
                                                 'x265-params': f'lossless=1:ctu={ctu_size}',
                                             },
                                 1:{
                                                 'vcodec': 'libx265',
-                                                'crf': '0',
-                                                'pix_fmt': 'gray16le',
+                                                'crf': '0', 
+                                                'pix_fmt': 'gray12le',
+                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             },
                                 2:{
                                                 'vcodec': 'libx265',
                                                 'crf': '5',
-                                                'pix_fmt': 'gray16le',
+                                                'pix_fmt': 'gray12le',
+                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             },
 
                                 3:{
                                                 'vcodec': 'libx265',
                                                 'crf': '15',
-                                                'pix_fmt': 'gray16le',
+                                                'pix_fmt': 'gray12le',
+                                                'channels': '1',
                                                 'x265-params': f'ctu={ctu_size}',
                                             }                                      
                                             
