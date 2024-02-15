@@ -17,7 +17,7 @@ path2 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-s
 stem= 'MT0'
 
 # Define ranges for grid search
-kernel_sizes = range(5, 12, 2) #  5, 7, 9, 11
+kernel_sizes =  range(5, 12, 2) #  5, 7, 9, 11 
 rel_thresholds = [0.35, 0.45, 0.55, 0.65]  # 0.35, 0.45, 0.55, 0.65
 compression_levels = [0, 1, 2, 3]  # 0, 1, 2, 3
 
