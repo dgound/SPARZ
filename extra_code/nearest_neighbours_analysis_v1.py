@@ -406,12 +406,12 @@ for file in tqdm(files):
 
 #%%
 # save df_out to csv
-df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'), index=False)
+df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+'_distances.csv'), index=False)
 # count the number of localizations per codec
-df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_n_loc.csv'), index=False)
+df_out.groupby('label').count().to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+'_n_loc.csv'), index=False)
 
 # save df_stats_out to csv
-df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'), index=False)
+df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+'_metrics.csv'), index=False)
 
 
 
