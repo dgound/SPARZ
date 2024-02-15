@@ -295,7 +295,7 @@ raw_dff = h5r_to_df(filepath=raw_files[0])
 raw_df = raw_dff[(raw_dff["fitError_x0"] > 0) & (raw_dff["fitError_x0"] < 30) & (raw_dff["fitError_y0"] > 0) & (raw_dff["fitError_y0"] < 30) & (raw_dff["fitResults_A"] > 5) & (raw_dff["fitResults_A"] < max_accuracy)]
 
 
-col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0']
+col_select = ['fitResults_x0',	'fitResults_y0', 'fitResults_z0', 'tIndex']
 raw = raw_df.reset_index()[col_select]
 n_neighbors = 1
 
@@ -308,12 +308,14 @@ fig.update_traces(marker=dict(size=1))
 fig.write_image(os.path.join(path+ '/output/', data_name+ date+'_'+os.path.basename(raw_files[0])+'_localizations.png'), width=800, height=800, scale=2)
 fig.show()
 
+
 #%%
 # DF COMPRESSED create an empty dataframe to save the results
 df_out = pd.DataFrame(columns=['distance', 'codec', 'label'])
 df_stats_out = pd.DataFrame(columns=['metric', 'codec', 'label', 'value'])
 
 
+#%%
 # loop over the files and compute the nearest neighbours
 for file in tqdm(files):
     # df_out_temp = pd.DataFrame(columns=['distance', 'codec'])
@@ -323,15 +325,18 @@ for file in tqdm(files):
     locs = locs[(locs["fitError_x0"] > 0) & (locs["fitError_x0"] < 30) & (locs["fitError_y0"] > 0) & (locs["fitError_y0"] < 30) & (locs["fitResults_A"] > 5) & (locs["fitResults_A"] < max_accuracy)]
     df_query = locs.reset_index()[col_select]
     # distances, indices = compute_nearest_neighbours_parallel(df_query, raw, n_neighbors=1, n_jobs=num_cores)
-    distances, indices = compute_nearest_neighbours(raw, df_query, n_neighbors=1)
+    distances, indices = compute_nearest_neighbours(raw.iloc[:,:3], df_query.iloc[:,:3], n_neighbors=1)
+
     df_query['distances'] = distances.flatten()
     distances_flat = distances.flatten()
     distances_flat = distances_flat[~np.isnan(distances_flat)]
+
 
     codec_label = os.path.basename(os.path.dirname(os.path.dirname(file)))
     codec_name = codec_label + '_' + data_name + date
     df_to_append = pd.DataFrame({'distance': distances_flat, 'codec': [codec_name]*len(distances_flat),'label': [codec_label]*len(distances_flat)})
     df_out = pd.concat([df_out, df_to_append], ignore_index=True)
+
 
     # compute the metrics
     # histogram comparison
@@ -339,22 +344,42 @@ for file in tqdm(files):
     hist_comp_to_append = pd.DataFrame({'metric': ['Histogram'], 'codec': [codec_name], 'value': [hist_comp],'label': [codec_label]})
     
     # jaccard 
-    jaccard = compute_jaccard_similarity_manual(df_query.iloc[:,:3].values, raw.values, voxel_size=20)
+    jaccard = compute_jaccard_similarity_manual(df_query[col_select[:3]].values, raw[col_select[:3]].values, voxel_size=20)
     jaccard_to_append = pd.DataFrame({'metric': ['Jaccard'], 'codec': [codec_name], 'value': [jaccard],'label': [codec_label]})
 
-    # jaccard RUN BY TIME POINT
-    frames_q = df_query.index
-    frames_raw = raw.index
+    # # jaccard RUN BY TIME POINT
+    # # frames_q = df_query.index
+    # # frames_raw = raw.index
+    # # frames = list(set(frames_raw).intersection(frames_q))
+    # # jaccard_byTime = []
+    # # for frame in frames:
+    # #     jaccard_byTime.append(compute_jaccard_similarity_manual(df_query.loc[frame].values.reshape(1, -1), raw.loc[frame].values.reshape(1, -1), voxel_size=20))
+    # # jaccard_byTime_to_append = pd.DataFrame({'metric': ['Jaccard_byTime'], 'codec': [codec_name], 'value': np.mean([jaccard_byTime]),'label': [codec_label]})
+
+    frames_q = df_query.tIndex
+    frames_raw = raw.tIndex
     frames = list(set(frames_raw).intersection(frames_q))
     jaccard_byTime = []
+    print("computing Jaccard by time")
+    # calculate the jaccard index for each time point and every localization
     for frame in frames:
-        jaccard_byTime.append(compute_jaccard_similarity_manual(df_query.loc[frame].values.reshape(1, -1), raw.loc[frame].values.reshape(1, -1), voxel_size=20))
-    jaccard_byTime_to_append = pd.DataFrame({'metric': ['Jaccard_byTime'], 'codec': [codec_name], 'value': [jaccard_byTime],'label': [codec_label]})
+        df1 = df_query.loc[df_query["tIndex"] == frame]
+        df2 = raw.loc[raw["tIndex"] == frame]
+        if df1.shape[0] > 0 or df2.shape[0] > 0:
+            if df1.shape[0] > df2.shape[0]:
+                jaccard_byTime.append(compute_jaccard_similarity_manual(df1.iloc[:,:3].values, df2.iloc[:,:3].values, voxel_size=20))
+            else:
+                jaccard_byTime.append(compute_jaccard_similarity_manual(df2.iloc[:,:3].values, df1.iloc[:,:3].values, voxel_size=20))
+        else:
+            next
+
+    jaccard_byTime_to_append = pd.DataFrame({'metric': ['Jaccard_byTime'], 'codec': [codec_name], 'value': np.mean(jaccard_byTime),'label': [codec_label]})
+
+    # print("computing Wasserstein")
 
     # wasserstein
     wasserstein = compute_wasserstein_distance(df_query.iloc[:,:3], raw)
     wasserstein_to_append = pd.DataFrame({'metric': ['Wasserstein coordinates'], 'codec': [codec_name], 'value': [wasserstein],'label': [codec_label]})
-
     zeros = np.zeros(len(distances_flat))
     wasserstein_dist = compute_wasserstein_distance_1D(zeros, distances.flatten())
     wasserstein_dist_to_append = pd.DataFrame({'metric': ['Wasserstein NN distances'], 'codec': [codec_name], 'value': [wasserstein_dist],'label': [codec_label]})
@@ -367,7 +392,7 @@ for file in tqdm(files):
     fig.update_traces(marker=dict(size=1))
     fig.update_layout(legend= {'itemsizing': 'constant'})
     # save plot to file
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations.png'), width=800, height=800, scale=2)
+    fig.write_image(os.path.join(path+ 'output/', data_name+ date +'_'+ codec_label+'_localizations.png'), width=800, height=800, scale=2)
     fig.show()
 
     # plot that colors the localizations based on the distance threshold
@@ -375,10 +400,11 @@ for file in tqdm(files):
     fig = px.scatter(df_query, x='fitResults_x0', y='fitResults_y0', color='distance_threshold', opacity=0.6, title = data_name+ date +'_'+ codec_label, color_discrete_map={">40": "red", "<40": "grey"})
     fig.update_traces(marker=dict(size=1))
     fig.update_layout(legend= {'itemsizing': 'constant'})
-    fig.write_image(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
+    fig.write_image(os.path.join(path+ 'output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_thresholded.png'), width=800, height=800, scale=2)
     fig.show()
-    df_query.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
+    df_query.to_csv(os.path.join(path+ 'output/', data_name+ date +'_'+ codec_label+'_localizations_'+str(dist_threshold)+'_locs_with_nn_dist.csv'), index=False)
 
+#%%
 # save df_out to csv
 df_out.to_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'), index=False)
 # count the number of localizations per codec
@@ -392,6 +418,7 @@ df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_la
 #####################################################################
 # read in saved dataframes
 #####################################################################
+
 #%%
 df_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'))
 df_stats_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'))
@@ -465,6 +492,8 @@ plt.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
 ax.set(yscale="log")
 ax.set_ylabel('Value (log)')
 ax.set_xlabel(' ')
+ax.get_legend().remove()
+plt.xticks(rotation=45, ha='right')
 
 
 #%%
