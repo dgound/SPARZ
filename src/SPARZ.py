@@ -22,7 +22,9 @@ import json
 from dask import delayed
 import ffmpeg
 from dask.diagnostics import ProgressBar
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# from concurrent.futures import ThreadPoolExecutor, as_completed
+import zstd
+from statsmodels.stats.power import TTestIndPower
 
 #%%
 class SPARZIP:
@@ -633,11 +635,43 @@ class SPARZIP:
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
+    def zstd_compress(self, effect_size, power):
+        # Perform power analysis to find sample size
+        analysis = TTestIndPower()
+        sample_size = analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05)
+
+        # Sample frames from bp1 and bp2
+        bp1_samples = np.random.choice(self.bp1, sample_size)
+        bp2_samples = np.random.choice(self.bp2, sample_size)
+
+        # Train dictionaries
+        bp1_dict = zstd.train_dictionary(sample_size, bp1_samples)
+        bp2_dict = zstd.train_dictionary(sample_size, bp2_samples)
+
+        # Compress bp1 and bp2 using the trained dictionaries
+        cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict)
+        cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict)
+
+        compressed_bp1 = cctx_bp1.compress(self.bp1)
+        compressed_bp2 = cctx_bp2.compress(self.bp2)
+
+        # Save compressed data to disk
+        with open('compressed_bp1.zst', 'wb') as f:
+            f.write(compressed_bp1)
+
+        with open('compressed_bp2.zst', 'wb') as f:
+            f.write(compressed_bp2)
+
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
         if self.find_roi:
             self.deflate()
             gc.collect()
-        self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
+        if codec !='zstd':
+            self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
+        elif codec=='zstd':
+            self.zstd_compress(effect_size=0.5, power=0.8)
+        else:
+            raise ValueError(f'Unsupported codec: {codec}.')
 
 
 class SPARUNZIP:
