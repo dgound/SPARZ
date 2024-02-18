@@ -407,7 +407,7 @@ class SPARZIP:
             return 64  # Default CTU size for larger images
         
 
-    def encode(self, codec:str='x265', compression_lvl:int=0):
+    def encode(self, codec:str='x265', compression_lvl:int=0, custom_dict:dict=None, custom_file_extension:str=None):
         if codec =='x265':
             w, h = self.bp1[0].shape[1], self.bp1[0].shape[2]
             ctu_size = self.determine_ctu_size(w, h)
@@ -537,6 +537,13 @@ class SPARZIP:
                 'profile:v': 'lt',
             }
         }
+        
+        elif codec =='user':
+            assert custom_dict is not None, 'Error: Custom dictionary not provided.'
+            assert custom_file_extension is not None, 'Error: Custom file extension not provided.'
+            assert isinstance(custom_dict, dict), 'Error: Custom dictionary must be a dictionary.'
+            assert 'vcodec' in custom_dict.keys(), 'Error: Custom dictionary must contain a vcodec key.'
+            print ('Applying user defined settings.')
 
         else:
             raise ValueError(f'Unsupported codec: {codec}. Supported codecs are x265 and av1.')
@@ -555,7 +562,10 @@ class SPARZIP:
                 video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
             else:
                 video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.avi'
-            writer_args = compression_levels[compression_lvl]
+            if codec!='user':
+                writer_args = compression_levels[compression_lvl]
+            else:
+                writer_args = custom_dict
 
             if self.single_plane:
                 writes.append(delayed(self.write_frames_to_video)(
@@ -567,6 +577,8 @@ class SPARZIP:
                     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
                 elif codec =='ffv1':
                     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
+                elif codec=='user':
+                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.{custom_file_extension}'
                 else:
                     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
                 # video_name1 = f'{self.output_path}{self.stem}_bp1_compression_level_{compression_lvl}_part_{k}.mp4'
@@ -579,6 +591,8 @@ class SPARZIP:
                     video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mov'
                 elif codec=='ffv1':
                     video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.avi'
+                elif codec=='user':
+                    video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.{custom_file_extension}'
                 else:
                     video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mp4'
                 # video_name2 = f'{self.output_path}{self.stem}_bp2_compression_level_{compression_lvl}_part_{k}.mp4'
@@ -619,11 +633,11 @@ class SPARZIP:
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
-    def run(self,codec:str='x265', compression_level:int=0):#,find_peaks:bool=True):
+    def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
         if self.find_roi:
             self.deflate()
             gc.collect()
-        self.encode(codec=codec, compression_lvl=compression_level)
+        self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
 
 
 class SPARUNZIP:
