@@ -469,6 +469,75 @@ class SPARZIP:
                                             
                                             
                             }
+        elif codec == 'x264':
+            compression_levels = {0: {
+                                                'vcodec': 'libx264',
+                                                'pix_fmt': 'gray16le',
+                                                'crf': '0'
+                                },
+                                1:{
+                                                'vcodec': 'libx264',
+                                                'crf': '5',
+                                                'pix_fmt': 'gray16le'
+                                },
+                                2:{
+                                                'vcodec': 'libx264',
+                                                'crf': '15',
+                                                'pix_fmt': 'gray16le'
+                                },
+                                3:{
+                                                'vcodec': 'libx264',
+                                                'crf': '25',
+                                                'pix_fmt': 'gray16le'
+                                }
+                }
+
+        elif codec =='ffv1':
+            compression_levels = {0: {
+                                                'vcodec': 'ffv1',
+                                                'pix_fmt': 'gray16le',
+                                },
+                                1:{
+                                                'vcodec': 'ffv1',
+                                                'pix_fmt': 'gray16le',
+                                                'level': '3'
+                                },
+                                2:{
+                                                'vcodec': 'ffv1',
+                                                'pix_fmt': 'gray16le',
+                                                'level': '1'
+                                },
+                                3:{
+                                                'vcodec': 'ffv1',
+                                                'pix_fmt': 'gray16le',
+                                                'level': '0'
+                                }
+    
+                }
+        elif codec == 'prores':
+            compression_levels = {
+            0: {
+                'vcodec': 'prores_ks',
+                'pix_fmt': 'yuv444p10le',
+                'profile:v': '4444',
+            },
+            1: {
+                'vcodec': 'prores_ks',
+                'pix_fmt': 'yuv422p10le',
+                'profile:v': 'hq',
+            },
+            2: {
+                'vcodec': 'prores_ks',
+                'pix_fmt': 'yuv422p10le',
+                'profile:v': 'standard',
+            },
+            3: {
+                'vcodec': 'prores_ks',
+                'pix_fmt': 'yuv422p10le',
+                'profile:v': 'lt',
+            }
+        }
+
         else:
             raise ValueError(f'Unsupported codec: {codec}. Supported codecs are x265 and av1.')
         print('Compressing video...')
@@ -482,7 +551,10 @@ class SPARZIP:
         writes = []
         for k in range(len(self.processed_bp1)):
             input_file_name = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-            video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
+            if codec !='ffv1':
+                video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
+            else:
+                video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.avi'
             writer_args = compression_levels[compression_lvl]
 
             if self.single_plane:
@@ -491,13 +563,24 @@ class SPARZIP:
                 ))
             else:
                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
+                if codec =='prores':
+                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
+                elif codec =='ffv1':
+                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
+                else:
+                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
                 # video_name1 = f'{self.output_path}{self.stem}_bp1_compression_level_{compression_lvl}_part_{k}.mp4'
                 writes.append(delayed(self.write_frames_to_video)(
                     self.bp1[k], video_name1, writer_args
                 ))
                 input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
-                video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mp4'
+                
+                if codec=='prores':
+                    video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mov'
+                elif codec=='ffv1':
+                    video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.avi'
+                else:
+                    video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mp4'
                 # video_name2 = f'{self.output_path}{self.stem}_bp2_compression_level_{compression_lvl}_part_{k}.mp4'
                 writes.append(delayed(self.write_frames_to_video)(
                     self.bp2[k], video_name2, writer_args
@@ -559,8 +642,9 @@ class SPARUNZIP:
         self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
         self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
-        self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
-        self.processed_bp1, self.processed_bp2 = self.process_frames()
+        if use_roi:
+            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
+            self.processed_bp1, self.processed_bp2 = self.process_frames()
         self.stem = stem
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
@@ -673,8 +757,11 @@ class SPARUNZIP:
             
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
-
-                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                if type(self.path_encoded_bp1) == list:
+                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
+                else:
+                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
+                
                 filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
 
@@ -690,7 +777,10 @@ class SPARUNZIP:
                 if show_progress_bar:
                     progress_bar.close()
                 if self.encoded_bp2 is not None:
-                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    if type(self.path_encoded_bp2) == list:
+                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    else:
+                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
