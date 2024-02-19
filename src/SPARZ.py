@@ -680,7 +680,7 @@ class SPARZIP:
                 f.write(compressed_bp2)
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
-        if self.find_roi:
+        if (self.find_roi) and (codec !='zstd'):
             self.deflate()
             gc.collect()
         if codec !='zstd':
