@@ -23,7 +23,7 @@ from dask import delayed
 import ffmpeg
 from dask.diagnostics import ProgressBar
 # from concurrent.futures import ThreadPoolExecutor, as_completed
-import zstd
+import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 
 #%%
@@ -635,32 +635,49 @@ class SPARZIP:
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
+        
     def zstd_compress(self, effect_size, power):
         # Perform power analysis to find sample size
         analysis = TTestIndPower()
-        sample_size = analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05)
+        sample_size = int(analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05))
 
         # Sample frames from bp1 and bp2
-        bp1_samples = np.random.choice(self.bp1, sample_size)
-        bp2_samples = np.random.choice(self.bp2, sample_size)
+        for k in range(len(self.bp1)):
+            bp1_samples = np.random.choice(self.bp1[k].shape[0], sample_size, replace=False)
+            bp1_samples = self.bp1[k][bp1_samples].flatten().compute()
 
-        # Train dictionaries
-        bp1_dict = zstd.train_dictionary(sample_size, bp1_samples)
-        bp2_dict = zstd.train_dictionary(sample_size, bp2_samples)
+            bp2_samples = np.random.choice(self.bp2[k].shape[0], sample_size, replace=False)
+            bp2_samples = self.bp2[k][bp2_samples].flatten().compute()
 
-        # Compress bp1 and bp2 using the trained dictionaries
-        cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict)
-        cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict)
 
-        compressed_bp1 = cctx_bp1.compress(self.bp1)
-        compressed_bp2 = cctx_bp2.compress(self.bp2)
+            print(f'Training dictionaries with {sample_size} samples...')
+            bp1_dict = zstd.ZstdCompressionDict(bp1_samples.tobytes())
+            bp2_dict = zstd.ZstdCompressionDict(bp2_samples.tobytes())
+        
 
-        # Save compressed data to disk
-        with open('compressed_bp1.zst', 'wb') as f:
-            f.write(compressed_bp1)
+            cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict)
+            cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict)
 
-        with open('compressed_bp2.zst', 'wb') as f:
-            f.write(compressed_bp2)
+            # compressed_bp1 = cctx_bp1.compress(self.bp1[k].tobytes())
+            # compressed_bp1 = self.bp1[k].map_blocks(cctx_bp1.compress, dtype=self.bp1[k].dtype)
+            # compressed_bp2 = self.bp1[k].map_blocks(cctx_bp2.compress, dtype=self.bp2[k].dtype)
+
+            # compressed_bp2 = cctx_bp2.compress(self.bp2[k].tobytes())
+            
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+            # Save compressed data to disk
+
+            # self.bp1[k].map_blocks(self.compress_and_save, compressor=cctx_bp1, filename=f'{input_file_name1}.zst', dtype=self.bp1[k].dtype).compute()
+            # self.bp2[k].map_blocks(self.compress_and_save, compressor=cctx_bp2, filename=f'{input_file_name2}.zst', dtype=self.bp2[k].dtype).compute()
+            compressed_bp1 = cctx_bp1.compress(self.bp1[k].compute().tobytes())
+            compressed_bp2 = cctx_bp2.compress(self.bp2[k].compute().tobytes())
+
+            with open(f'{input_file_name1}.zst', 'wb') as f:
+                f.write(compressed_bp1)
+
+            with open(f'{input_file_name2}.zst', 'wb') as f:
+                f.write(compressed_bp2)
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
         if self.find_roi:
@@ -669,7 +686,7 @@ class SPARZIP:
         if codec !='zstd':
             self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
         elif codec=='zstd':
-            self.zstd_compress(effect_size=0.5, power=0.8)
+            self.zstd_compress(effect_size=0.5, power=0.95)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
 
