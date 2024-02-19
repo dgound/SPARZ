@@ -559,11 +559,22 @@ class SPARZIP:
         # Process videos using delayed
         writes = []
         for k in range(len(self.processed_bp1)):
-            input_file_name = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-            if codec !='ffv1':
-                video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+
+            if codec =='prores':
+                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
+            elif codec =='ffv1':
+                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
+            elif codec=='user':
+                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.{custom_file_extension}'
             else:
-                video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.avi'
+                video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
+                
+
+            # if codec !='ffv1':
+            #     video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
+            # else:
+            #     video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.avi'
             if codec!='user':
                 writer_args = compression_levels[compression_lvl]
             else:
@@ -571,18 +582,18 @@ class SPARZIP:
 
             if self.single_plane:
                 writes.append(delayed(self.write_frames_to_video)(
-                    self.bp1[k], video_name, writer_args
+                    self.bp1[k], video_name1, writer_args
                 ))
             else:
-                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-                if codec =='prores':
-                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
-                elif codec =='ffv1':
-                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
-                elif codec=='user':
-                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.{custom_file_extension}'
-                else:
-                    video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
+                # input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+                # if codec =='prores':
+                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
+                # elif codec =='ffv1':
+                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
+                # elif codec=='user':
+                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.{custom_file_extension}'
+                # else:
+                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
                 # video_name1 = f'{self.output_path}{self.stem}_bp1_compression_level_{compression_lvl}_part_{k}.mp4'
                 writes.append(delayed(self.write_frames_to_video)(
                     self.bp1[k], video_name1, writer_args
@@ -663,7 +674,6 @@ class SPARZIP:
             # compressed_bp2 = self.bp1[k].map_blocks(cctx_bp2.compress, dtype=self.bp2[k].dtype)
 
             # compressed_bp2 = cctx_bp2.compress(self.bp2[k].tobytes())
-            
             input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
             input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
             # Save compressed data to disk
@@ -673,10 +683,10 @@ class SPARZIP:
             compressed_bp1 = cctx_bp1.compress(self.bp1[k].compute().tobytes())
             compressed_bp2 = cctx_bp2.compress(self.bp2[k].compute().tobytes())
 
-            with open(f'{input_file_name1}.zst', 'wb') as f:
+            with open(f'{self.output_path}{self.stem}_{input_file_name1}.zst', 'wb') as f:
                 f.write(compressed_bp1)
 
-            with open(f'{input_file_name2}.zst', 'wb') as f:
+            with open(f'{self.output_path}{self.stem}_{input_file_name2}.zst', 'wb') as f:
                 f.write(compressed_bp2)
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
@@ -705,7 +715,10 @@ class SPARUNZIP:
         
         self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
-        self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
+        if os.path.splitext(self.encoded_bp1_files[0])[1] == '.zst':
+            self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
+        else:
+            self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         if use_roi:
             self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
@@ -756,7 +769,34 @@ class SPARUNZIP:
             bp1.append(vimread(files_bp1[i], dtypes='uint16'))
         return bp1, None
         # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
-    
+
+    def decode_zst(self, path_bp1:str, path_bp2:str):
+        print('Decoding images...')
+        files_bp1 = sorted(glob.glob(path_bp1))
+        dctx = zstd.ZstdDecompressor()
+        if path_bp2 is not None:
+            files_bp2 = sorted(glob.glob(path_bp2))
+            self.encoded_bp2_files = files_bp2
+            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+            bp1, bp2 = [], []
+            for i in range(len(files_bp1)):
+                with open(files_bp1[i], 'rb') as fh:
+                    decompressed_data = dctx.decompress(fh.read())
+                data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+                bp1.append(da.from_array(data_array))
+                with open(files_bp2[i], 'rb') as fh:
+                    decompressed_data = dctx.decompress(fh.read())
+                data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+                bp2.append(da.from_array(data_array))
+            return bp1, bp2
+        bp1 = []
+        for i in range(len(files_bp1)):
+            with open(files_bp1[i], 'rb') as fh:
+                decompressed_data = dctx.decompress(fh.read())
+            data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+            bp1.append(da.from_array(data_array))
+        return bp1, None
+
     def process_frames(self):
         print('Lazily Processing images...')
         if self.encoded_bp2 is None:
@@ -822,10 +862,10 @@ class SPARUNZIP:
             
             for k in range(len(self.encoded_bp1)):
                 num_frames = self.encoded_bp1[k].shape[0]
-                if type(self.path_encoded_bp1) == list:
-                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
-                else:
-                    input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
+                # if type(self.path_encoded_bp1) == list:
+                input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.encoded_bp1_files[k]))[1])[0]
+                # else:
+                    # input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1))[1])[0]
                 
                 filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
@@ -842,10 +882,10 @@ class SPARUNZIP:
                 if show_progress_bar:
                     progress_bar.close()
                 if self.encoded_bp2 is not None:
-                    if type(self.path_encoded_bp2) == list:
-                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
-                    else:
-                        input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
+                    # if type(self.path_encoded_bp2) == list:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.encoded_bp2_files[k]))[1])[0]
+                    # else:
+                        # input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
                     filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
@@ -860,3 +900,26 @@ class SPARUNZIP:
                     if show_progress_bar:
                         progress_bar.close()
         print('Done.')
+
+# # %%
+# bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+# # %%
+# z=SPARZIP(path_image_files1=bp1,
+#            path_image_files2=bp2,
+#            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+#            stem='test',
+#            find_peaks=False)
+# # %%
+# z.run(codec='zstd')
+# # %%
+# u=SPARUNZIP(path_sparse_bp1=None,
+#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/test_sequence-as-stack-MT0.N1.HD-BP+250.zst',
+#             stem='test',
+#             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+#             path_sparse_bp2=None,
+#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/test_sequence-as-stack-MT0.N1.HD-BP-250.zst',
+#             use_roi=False)
+# # %%
+# u.run()
+# # %%
