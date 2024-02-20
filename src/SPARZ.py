@@ -647,7 +647,7 @@ class SPARZIP:
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
         
-    def zstd_compress(self, effect_size, power):
+    def zstd_compress(self, compression_level, effect_size, power):
         # Perform power analysis to find sample size
         analysis = TTestIndPower()
         sample_size = int(analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05))
@@ -666,8 +666,8 @@ class SPARZIP:
             bp2_dict = zstd.ZstdCompressionDict(bp2_samples.tobytes())
         
 
-            cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict)
-            cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict)
+            cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict,level=compression_level)
+            cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict,level=compression_level)
 
             # compressed_bp1 = cctx_bp1.compress(self.bp1[k].tobytes())
             # compressed_bp1 = self.bp1[k].map_blocks(cctx_bp1.compress, dtype=self.bp1[k].dtype)
@@ -684,19 +684,29 @@ class SPARZIP:
             compressed_bp2 = cctx_bp2.compress(self.bp2[k].compute().tobytes())
 
             with open(f'{self.output_path}{self.stem}_{input_file_name1}.zst', 'wb') as f:
-                f.write(compressed_bp1)
+                with cctx.stream_writer(f) as compressor:
+                    compressor.write(compressed_bp1)
 
             with open(f'{self.output_path}{self.stem}_{input_file_name2}.zst', 'wb') as f:
-                f.write(compressed_bp2)
+                with cctx.stream_writer(f) as compressor:
+                    compressor.write(compressed_bp2)
+
+            # with open(f'{self.output_path}{self.stem}_{input_file_name1}.zst', 'wb') as f:
+            #     f.write(compressed_bp1)
+
+            # with open(f'{self.output_path}{self.stem}_{input_file_name2}.zst', 'wb') as f:
+            #     f.write(compressed_bp2)
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
         if (self.find_roi) and (codec !='zstd'):
             self.deflate()
             gc.collect()
-        if codec !='zstd':
+        if codec in ['x265', 'av1', 'x264', 'ffv1', 'prores', 'user']:
+            assert compression_level in [0,1,2,3], 'Error: Compression level for ffmpeg based compression must be 0, 1, 2 or 3.'
             self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
         elif codec=='zstd':
-            self.zstd_compress(effect_size=0.5, power=0.95)
+            assert compression_level <= 22, 'Error: Valid compression levels for Zstandard compression are all negative integers through 22.'
+            self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
 
