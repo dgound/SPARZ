@@ -646,58 +646,84 @@ class SPARZIP:
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
         ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
 
-        
-    def zstd_compress(self, compression_level, effect_size, power):
+    def zstd_compress(self, compression_level, effect_size, power, compute_dict):
         # Perform power analysis to find sample size
         analysis = TTestIndPower()
         sample_size = int(analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05))
 
-        # Sample frames from bp1 and bp2
+        # Initialize the ZstdCompressor with the desired compression level
+        cctx = zstd.ZstdCompressor(level=compression_level)
+
+        # Sample and compress frames from bp1 and bp2
         for k in range(len(self.bp1)):
-            bp1_samples = np.random.choice(self.bp1[k].shape[0], sample_size, replace=False)
-            bp1_samples = self.bp1[k][bp1_samples].flatten().compute()
-
-            bp2_samples = np.random.choice(self.bp2[k].shape[0], sample_size, replace=False)
-            bp2_samples = self.bp2[k][bp2_samples].flatten().compute()
-
-
-            print(f'Training dictionaries with {sample_size} samples...')
-            bp1_dict = zstd.ZstdCompressionDict(bp1_samples.tobytes())
-            bp2_dict = zstd.ZstdCompressionDict(bp2_samples.tobytes())
-        
-
-            cctx_bp1 = zstd.ZstdCompressor(dict_data=bp1_dict,level=compression_level)
-            cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict,level=compression_level)
-
-            # compressed_bp1 = cctx_bp1.compress(self.bp1[k].tobytes())
-            # compressed_bp1 = self.bp1[k].map_blocks(cctx_bp1.compress, dtype=self.bp1[k].dtype)
-            # compressed_bp2 = self.bp1[k].map_blocks(cctx_bp2.compress, dtype=self.bp2[k].dtype)
-
-            # compressed_bp2 = cctx_bp2.compress(self.bp2[k].tobytes())
             input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
             input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
-            # Save compressed data to disk
+            # Assume self.bp1[k] and self.bp2[k] can be iterated chunk-wise
+            if compute_dict:
+            # Compute sample size based frames
+                bp1_samples = np.random.choice(self.bp1[k].shape[0], sample_size, replace=False)
+                bp1_samples = self.bp1[k][bp1_samples].flatten().compute()
+                bp1_sample_bytes = [sample.tobytes() for sample in bp1_samples]
+                bp2_samples = np.random.choice(self.bp2[k].shape[0], sample_size, replace=False)
+                bp2_samples = self.bp2[k][bp2_samples].flatten().compute()
+                bp2_sample_bytes = [sample.tobytes() for sample in bp2_samples]
+            
+                print(f'Training dictionaries with {sample_size} samples...')
+                bp1_dict = zstd.ZstdCompressionDict(bp1_samples,dict_type=zstd.DICT_TYPE_RAWCONTENT)
+                bp2_dict = zstd.ZstdCompressionDict(bp2_samples,dict_type=zstd.DICT_TYPE_RAWCONTENT)
+                
+                bp1_dict = zstd.train_dictionary(dict_size=131072,samples=bp1_sample_bytes)
+                bp2_dict = zstd.train_dictionary(dict_size=131072,samples=bp2_sample_bytes)
+                        
 
-            # self.bp1[k].map_blocks(self.compress_and_save, compressor=cctx_bp1, filename=f'{input_file_name1}.zst', dtype=self.bp1[k].dtype).compute()
-            # self.bp2[k].map_blocks(self.compress_and_save, compressor=cctx_bp2, filename=f'{input_file_name2}.zst', dtype=self.bp2[k].dtype).compute()
-            compressed_bp1 = cctx_bp1.compress(self.bp1[k].compute().tobytes())
-            compressed_bp2 = cctx_bp2.compress(self.bp2[k].compute().tobytes())
+                print(f'Compressing data with compression level {compression_level}...')
+                # Update the compressor with dictionaries
+                cctx = zstd.ZstdCompressor(dict_data=bp1_dict, level=compression_level)
+                cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict, level=compression_level)
 
-            with open(f'{self.output_path}{self.stem}_{input_file_name1}.zst', 'wb') as f:
-                with cctx.stream_writer(f) as compressor:
-                    compressor.write(compressed_bp1)
 
-            with open(f'{self.output_path}{self.stem}_{input_file_name2}.zst', 'wb') as f:
-                with cctx.stream_writer(f) as compressor:
-                    compressor.write(compressed_bp2)
 
-            # with open(f'{self.output_path}{self.stem}_{input_file_name1}.zst', 'wb') as f:
-            #     f.write(compressed_bp1)
+                with open(f'{self.output_path}{input_file_name1}.zdict', 'wb') as f:
+                    f.write(bp1_dict.as_bytes())
+                with open(f'{self.output_path}{input_file_name2}.zdict', 'wb') as f:
+                    f.write(bp2_dict.as_bytes())
+            else:
+                print(f'Compressing data with compression level {compression_level} without dictionary...')
+                # Update the compressor with dictionaries
+                cctx = zstd.ZstdCompressor(level=compression_level)
+                cctx_bp2 = zstd.ZstdCompressor(level=compression_level)
 
-            # with open(f'{self.output_path}{self.stem}_{input_file_name2}.zst', 'wb') as f:
-            #     f.write(compressed_bp2)
 
-    def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None):#,find_peaks:bool=True):
+            # Use context manager for compressing and writing data
+            output_file1 = f'{self.output_path}{input_file_name1}_level_{compression_level}_dictionary_{compute_dict}.zst'
+            output_file2 = f'{self.output_path}{input_file_name2}_level_{compression_level}_dictionary_{compute_dict}.zst'
+
+
+
+
+            for chunk in self.bp1[k]:
+                with open(output_file1, 'wb') as f1, cctx.stream_writer(f1, write_size=32768) as compressor1:
+                    shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
+                    compressor1.write(shape_bytes)
+                    compressor1.write(chunk.compute().tobytes())
+                    compressor1.flush(zstd.FLUSH_FRAME)
+
+            for chunk in self.bp2[k]:
+                with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
+                    shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
+                    compressor2.write(shape_bytes)
+                    compressor2.write(chunk.compute().tobytes())
+                    compressor2.flush(zstd.FLUSH_FRAME)
+
+
+            # with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
+            #     shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
+            #     compressor2.write(shape_bytes)
+            #     for chunk in self.bp2[k]:
+            #         compressor2.write(chunk.compute().tobytes())
+            #     compressor2.flush(zstd.FLUSH_FRAME)
+
+    def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if (self.find_roi) and (codec !='zstd'):
             self.deflate()
             gc.collect()
@@ -706,7 +732,7 @@ class SPARZIP:
             self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
         elif codec=='zstd':
             assert compression_level <= 22, 'Error: Valid compression levels for Zstandard compression are all negative integers through 22.'
-            self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95)
+            self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95, compute_dict=compute_zstd_dict)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
 
@@ -718,6 +744,7 @@ class SPARUNZIP:
                  output_path:str, 
                  path_sparse_bp2:str=None, 
                  path_encoded_bp2:str=None, 
+                 use_zstd_dict:bool=False,
                  use_roi:bool=True, 
                  chunk_size:int=10, 
                  num_workers:int=4, 
@@ -725,6 +752,8 @@ class SPARUNZIP:
         
         self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
+        self.use_zstd_dict = use_zstd_dict
+
         if os.path.splitext(self.encoded_bp1_files[0])[1] == '.zst':
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
         else:
@@ -780,9 +809,50 @@ class SPARUNZIP:
         return bp1, None
         # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
 
-    def decode_zst(self, path_bp1:str, path_bp2:str):
+    def decode_zst(self, path_bp1: str, path_bp2: str = None):
+
         print('Decoding images...')
         files_bp1 = sorted(glob.glob(path_bp1))
+
+        if self.use_zstd_dict:
+            zstd_dict_bp1 = os.path.splitext(files_bp1[0])[0].split("_level")[0]
+            print ('asdasdasdasda', zstd_dict_bp1)
+            zstd_bp1_name = f'{zstd_dict_bp1}.zdict'
+            assert os.path.exists(zstd_bp1_name), 'Error: Zstandard for bp1 dictionary not found.'
+            with open(zstd_bp1_name, 'rb') as f:
+                zstd_dict_bp1 = zstd.ZstdCompressionDict(f.read())
+            if path_bp2 is not None:
+                self.encoded_bp2_files = sorted(glob.glob(path_bp2))
+                zstd_dict_bp2 = os.path.splitext(self.encoded_bp2_files[0])[0].split("_level")[0]
+                zstd_bp2_name = f'{zstd_dict_bp2}.zdict'
+                assert os.path.exists(zstd_bp2_name), 'Error: Zstandard for bp2 dictionary not found.'
+                with open(zstd_bp2_name, 'rb') as f:
+                    zstd_dict_bp2 = zstd.ZstdCompressionDict(f.read())
+
+            dctx_bp1 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp1)
+            dctx_bp2 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp2)
+            
+            bp1 = []
+            for file_path in files_bp1:
+                with open(file_path, 'rb') as fh, dctx_bp1.stream_reader(fh) as reader:
+                    decompressed_data = reader.read()
+                data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+                bp1.append(da.from_array(data_array))
+
+            if path_bp2:
+                files_bp2 = sorted(glob.glob(path_bp2))
+                assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+                bp2 = []
+                for file_path in files_bp2:
+                    with open(file_path, 'rb') as fh, dctx_bp2.stream_reader(fh) as reader:
+                        decompressed_data = reader.read()
+                    data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+                    print (data_array.shape)
+                    bp2.append(da.from_array(data_array))
+                return bp1, bp2
+
+            return bp1, None
+        
         dctx = zstd.ZstdDecompressor()
         if path_bp2 is not None:
             files_bp2 = sorted(glob.glob(path_bp2))
@@ -806,6 +876,34 @@ class SPARUNZIP:
             data_array = np.frombuffer(decompressed_data, dtype=np.float32)
             bp1.append(da.from_array(data_array))
         return bp1, None
+        
+
+    # def decode_zst(self, path_bp1:str, path_bp2:str):
+    #     print('Decoding images...')
+    #     files_bp1 = sorted(glob.glob(path_bp1))
+    #     dctx = zstd.ZstdDecompressor()
+    #     if path_bp2 is not None:
+    #         files_bp2 = sorted(glob.glob(path_bp2))
+    #         self.encoded_bp2_files = files_bp2
+    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+    #         bp1, bp2 = [], []
+    #         for i in range(len(files_bp1)):
+    #             with open(files_bp1[i], 'rb') as fh:
+    #                 decompressed_data = dctx.decompress(fh.read())
+    #             data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+    #             bp1.append(da.from_array(data_array))
+    #             with open(files_bp2[i], 'rb') as fh:
+    #                 decompressed_data = dctx.decompress(fh.read())
+    #             data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+    #             bp2.append(da.from_array(data_array))
+    #         return bp1, bp2
+    #     bp1 = []
+    #     for i in range(len(files_bp1)):
+    #         with open(files_bp1[i], 'rb') as fh:
+    #             decompressed_data = dctx.decompress(fh.read())
+    #         data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+    #         bp1.append(da.from_array(data_array))
+    #     return bp1, None
 
     def process_frames(self):
         print('Lazily Processing images...')
@@ -921,15 +1019,15 @@ class SPARUNZIP:
 #            stem='test',
 #            find_peaks=False)
 # # %%
-# z.run(codec='zstd')
+# z.run(codec='zstd',compute_zstd_dict=True,compression_level=3)
 # # %%
 # u=SPARUNZIP(path_sparse_bp1=None,
-#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/test_sequence-as-stack-MT0.N1.HD-BP+250.zst',
+#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_level_3_dictionary_True.zst',
 #             stem='test',
 #             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
 #             path_sparse_bp2=None,
-#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/test_sequence-as-stack-MT0.N1.HD-BP-250.zst',
-#             use_roi=False)
+#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_level_3_dictionary_True.zst',
+#             use_roi=False,
+#             use_zstd_dict=True)
 # # %%
 # u.run()
-# # %%
