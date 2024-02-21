@@ -701,19 +701,27 @@ class SPARZIP:
 
 
 
-            for chunk in self.bp1[k]:
-                with open(output_file1, 'wb') as f1, cctx.stream_writer(f1, write_size=32768) as compressor1:
-                    shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
-                    compressor1.write(shape_bytes)
-                    compressor1.write(chunk.compute().tobytes())
-                    compressor1.flush(zstd.FLUSH_FRAME)
+            with open(output_file1, 'wb') as f1, cctx.stream_writer(f1, write_size=32768) as compressor1:
+                shape_bytes = np.array(self.bp1[k].shape, dtype=np.int32).tobytes()
+                compressor1.write(shape_bytes)
 
-            for chunk in self.bp2[k]:
-                with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
-                    shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
-                    compressor2.write(shape_bytes)
+                dtype_bytes = np.array(str(self.bp1[k].dtype), dtype='S20').tobytes()
+                compressor1.write(dtype_bytes)
+
+                for chunk in self.bp1[k]:
+                    compressor1.write(chunk.compute().tobytes())
+                compressor1.flush(zstd.FLUSH_FRAME)
+
+            with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
+                shape_bytes = np.array(self.bp2[k].shape, dtype=np.int32).tobytes()
+                compressor2.write(shape_bytes)
+                
+                dtype_bytes = np.array(str(self.bp2[k].dtype), dtype='S20').tobytes()
+                compressor2.write(dtype_bytes)
+
+                for chunk in self.bp2[k]:
                     compressor2.write(chunk.compute().tobytes())
-                    compressor2.flush(zstd.FLUSH_FRAME)
+                compressor2.flush(zstd.FLUSH_FRAME)
 
 
             # with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
@@ -836,8 +844,26 @@ class SPARUNZIP:
             for file_path in files_bp1:
                 with open(file_path, 'rb') as fh, dctx_bp1.stream_reader(fh) as reader:
                     decompressed_data = reader.read()
-                data_array = np.frombuffer(decompressed_data, dtype=np.float32)
+                # Calculate the number of bytes used for shape
+
+
+                # Extract shape and dtype
+                data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
+                dtype_str = np.frombuffer(decompressed_data[12:32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
+
+                # Convert dtype string to actual dtype
+                data_dtype = np.dtype(dtype_str)
+
+                print ('data shape', data_shape)
+                print ('data dtype', data_dtype)
+
+                # Create the data array
+                data_array = np.frombuffer(decompressed_data[32:], dtype=data_dtype).reshape(data_shape)
                 bp1.append(da.from_array(data_array))
+                # data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
+                # print ('data shape', data_shape)
+                # data_array = np.frombuffer(decompressed_data[12:], dtype=np.float32).reshape(data_shape)
+                # bp1.append(da.from_array(data_array))
 
             if path_bp2:
                 files_bp2 = sorted(glob.glob(path_bp2))
@@ -846,9 +872,27 @@ class SPARUNZIP:
                 for file_path in files_bp2:
                     with open(file_path, 'rb') as fh, dctx_bp2.stream_reader(fh) as reader:
                         decompressed_data = reader.read()
-                    data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-                    print (data_array.shape)
+                    # Calculate the number of bytes used for shape
+
+
+                    # Extract shape and dtype
+                    data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
+                    dtype_str = np.frombuffer(decompressed_data[12:32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
+
+                    # Convert dtype string to actual dtype
+                    data_dtype = np.dtype(dtype_str)
+
+                    print ('data shape', data_shape)
+                    print ('data dtype', data_dtype)
+
+                    # Create the data array
+                    data_array = np.frombuffer(decompressed_data[32:], dtype=data_dtype).reshape(data_shape)
                     bp2.append(da.from_array(data_array))
+                    # data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
+                    # print ('data shape', data_shape)
+                    # data_array = np.frombuffer(decompressed_data[12:], dtype=np.float32).reshape(data_shape)
+                    # print (data_array.shape)
+                    # bp2.append(da.from_array(data_array))
                 return bp1, bp2
 
             return bp1, None
@@ -1009,25 +1053,27 @@ class SPARUNZIP:
                         progress_bar.close()
         print('Done.')
 
-# # %%
-# bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
-# bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
-# # %%
-# z=SPARZIP(path_image_files1=bp1,
-#            path_image_files2=bp2,
-#            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-#            stem='test',
-#            find_peaks=False)
-# # %%
-# z.run(codec='zstd',compute_zstd_dict=True,compression_level=3)
-# # %%
-# u=SPARUNZIP(path_sparse_bp1=None,
-#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_level_3_dictionary_True.zst',
-#             stem='test',
-#             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-#             path_sparse_bp2=None,
-#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_level_3_dictionary_True.zst',
-#             use_roi=False,
-#             use_zstd_dict=True)
-# # %%
-# u.run()
+# %%
+bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+# %%
+z=SPARZIP(path_image_files1=bp1,
+           path_image_files2=bp2,
+           output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+           stem='test',
+           find_peaks=False)
+# %%
+z.run(codec='zstd',compute_zstd_dict=True,compression_level=3)
+# %%
+u=SPARUNZIP(path_sparse_bp1=None,
+            path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_level_3_dictionary_True.zst',
+            stem='test',
+            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+            path_sparse_bp2=None,
+            path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_level_3_dictionary_True.zst',
+            use_roi=False,
+            use_zstd_dict=True)
+# %%
+u.run()
+
+# %%
