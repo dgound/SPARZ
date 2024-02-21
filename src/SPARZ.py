@@ -571,10 +571,6 @@ class SPARZIP:
                 video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
                 
 
-            # if codec !='ffv1':
-            #     video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.mp4'
-            # else:
-            #     video_name = f'{self.output_path}{self.stem}_{input_file_name}_compression_level_{compression_lvl}_part_{k}.avi'
             if codec!='user':
                 writer_args = compression_levels[compression_lvl]
             else:
@@ -585,16 +581,6 @@ class SPARZIP:
                     self.bp1[k], video_name1, writer_args
                 ))
             else:
-                # input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-                # if codec =='prores':
-                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
-                # elif codec =='ffv1':
-                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.avi'
-                # elif codec=='user':
-                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.{custom_file_extension}'
-                # else:
-                #     video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mp4'
-                # video_name1 = f'{self.output_path}{self.stem}_bp1_compression_level_{compression_lvl}_part_{k}.mp4'
                 writes.append(delayed(self.write_frames_to_video)(
                     self.bp1[k], video_name1, writer_args
                 ))
@@ -689,12 +675,10 @@ class SPARZIP:
                     f.write(bp2_dict.as_bytes())
             else:
                 print(f'Compressing data with compression level {compression_level} without dictionary...')
-                # Update the compressor with dictionaries
                 cctx = zstd.ZstdCompressor(level=compression_level)
                 cctx_bp2 = zstd.ZstdCompressor(level=compression_level)
 
 
-            # Use context manager for compressing and writing data
             output_file1 = f'{self.output_path}{input_file_name1}_level_{compression_level}_dictionary_{compute_dict}.zst'
             output_file2 = f'{self.output_path}{input_file_name2}_level_{compression_level}_dictionary_{compute_dict}.zst'
 
@@ -723,13 +707,6 @@ class SPARZIP:
                     compressor2.write(chunk.compute().tobytes())
                 compressor2.flush(zstd.FLUSH_FRAME)
 
-
-            # with open(output_file2, 'wb') as f2, cctx_bp2.stream_writer(f2, write_size=32768) as compressor2:
-            #     shape_bytes = np.array(chunk.shape, dtype=np.int32).tobytes()
-            #     compressor2.write(shape_bytes)
-            #     for chunk in self.bp2[k]:
-            #         compressor2.write(chunk.compute().tobytes())
-            #     compressor2.flush(zstd.FLUSH_FRAME)
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if (self.find_roi) and (codec !='zstd'):
@@ -790,10 +767,7 @@ class SPARUNZIP:
             for i in range(len(files_bp1)):
                 bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
                 bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-                # bp1 = da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[1],shapes[2]))
-                # bp2 = da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[1],shapes[2]))
             return bp1, bp2
-        # return bp1.map_blocks(lambda x: x.todense(), dtype='int16'), bp2.map_blocks(lambda x: x.todense(), dtype='int16')
         bp1 =[]
         for i in range(len(files_bp1)):
             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
@@ -844,26 +818,14 @@ class SPARUNZIP:
             for file_path in files_bp1:
                 with open(file_path, 'rb') as fh, dctx_bp1.stream_reader(fh) as reader:
                     decompressed_data = reader.read()
-                # Calculate the number of bytes used for shape
 
-
-                # Extract shape and dtype
                 data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
                 dtype_str = np.frombuffer(decompressed_data[12:32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
 
-                # Convert dtype string to actual dtype
                 data_dtype = np.dtype(dtype_str)
 
-                print ('data shape', data_shape)
-                print ('data dtype', data_dtype)
-
-                # Create the data array
                 data_array = np.frombuffer(decompressed_data[32:], dtype=data_dtype).reshape(data_shape)
                 bp1.append(da.from_array(data_array))
-                # data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
-                # print ('data shape', data_shape)
-                # data_array = np.frombuffer(decompressed_data[12:], dtype=np.float32).reshape(data_shape)
-                # bp1.append(da.from_array(data_array))
 
             if path_bp2:
                 files_bp2 = sorted(glob.glob(path_bp2))
@@ -872,27 +834,14 @@ class SPARUNZIP:
                 for file_path in files_bp2:
                     with open(file_path, 'rb') as fh, dctx_bp2.stream_reader(fh) as reader:
                         decompressed_data = reader.read()
-                    # Calculate the number of bytes used for shape
 
-
-                    # Extract shape and dtype
                     data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
                     dtype_str = np.frombuffer(decompressed_data[12:32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
 
-                    # Convert dtype string to actual dtype
                     data_dtype = np.dtype(dtype_str)
 
-                    print ('data shape', data_shape)
-                    print ('data dtype', data_dtype)
-
-                    # Create the data array
                     data_array = np.frombuffer(decompressed_data[32:], dtype=data_dtype).reshape(data_shape)
                     bp2.append(da.from_array(data_array))
-                    # data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
-                    # print ('data shape', data_shape)
-                    # data_array = np.frombuffer(decompressed_data[12:], dtype=np.float32).reshape(data_shape)
-                    # print (data_array.shape)
-                    # bp2.append(da.from_array(data_array))
                 return bp1, bp2
 
             return bp1, None
@@ -922,44 +871,13 @@ class SPARUNZIP:
         return bp1, None
         
 
-    # def decode_zst(self, path_bp1:str, path_bp2:str):
-    #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-    #     dctx = zstd.ZstdDecompressor()
-    #     if path_bp2 is not None:
-    #         files_bp2 = sorted(glob.glob(path_bp2))
-    #         self.encoded_bp2_files = files_bp2
-    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #         bp1, bp2 = [], []
-    #         for i in range(len(files_bp1)):
-    #             with open(files_bp1[i], 'rb') as fh:
-    #                 decompressed_data = dctx.decompress(fh.read())
-    #             data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-    #             bp1.append(da.from_array(data_array))
-    #             with open(files_bp2[i], 'rb') as fh:
-    #                 decompressed_data = dctx.decompress(fh.read())
-    #             data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-    #             bp2.append(da.from_array(data_array))
-    #         return bp1, bp2
-    #     bp1 = []
-    #     for i in range(len(files_bp1)):
-    #         with open(files_bp1[i], 'rb') as fh:
-    #             decompressed_data = dctx.decompress(fh.read())
-    #         data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-    #         bp1.append(da.from_array(data_array))
-    #     return bp1, None
-
     def process_frames(self):
         print('Lazily Processing images...')
         if self.encoded_bp2 is None:
             return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], None
         return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
 
-    # def save_file(self,arr, block_info=None):
-    #     """ Save file to foo-x-y.tif, where x and y are block locations """
-    #     filename = self.output_path+"decoded_bp1" + "-".join(map(str, block_info[0]["chunk-location"])) + ".tiff"
-    #     tifffile.imwrite(filename, arr, photometric='minisblack')
-    #     return arr
+
 
     def run(self):
         print('Inflating images...')
@@ -1053,27 +971,5 @@ class SPARUNZIP:
                         progress_bar.close()
         print('Done.')
 
-# %%
-bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
-bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
-# %%
-z=SPARZIP(path_image_files1=bp1,
-           path_image_files2=bp2,
-           output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-           stem='test',
-           find_peaks=False)
-# %%
-z.run(codec='zstd',compute_zstd_dict=True,compression_level=3)
-# %%
-u=SPARUNZIP(path_sparse_bp1=None,
-            path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_level_3_dictionary_True.zst',
-            stem='test',
-            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-            path_sparse_bp2=None,
-            path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_level_3_dictionary_True.zst',
-            use_roi=False,
-            use_zstd_dict=True)
-# %%
-u.run()
 
 # %%
