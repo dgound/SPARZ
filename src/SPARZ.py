@@ -663,20 +663,10 @@ class SPARZIP:
                         
 
                 print(f'Compressing data with compression level {compression_level}...')
-                # Update the compressor with dictionaries
-                # cctx = zstd.ZstdCompressor(dict_data=bp1_dict, level=compression_level)
-                # cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict, level=compression_level)
 
-
-
-                # with open(f'{self.output_path}{input_file_name1}.zdict', 'wb') as f:
-                #     f.write(bp1_dict.as_bytes())
-                # with open(f'{self.output_path}{input_file_name2}.zdict', 'wb') as f:
-                #     f.write(bp2_dict.as_bytes())
             else:
                 print(f'Compressing data with compression level {compression_level} without dictionary...')
-            # cctx = zstd.ZstdCompressor(level=compression_level)
-            # cctx_bp2 = zstd.ZstdCompressor(level=compression_level)
+
 
 
             output_file1 = f'{self.output_path}{input_file_name1}_level_{compression_level}.zst'
@@ -685,7 +675,6 @@ class SPARZIP:
             try:
                 with open(output_file1, 'wb') as f1:
                     if compute_dict:
-                        # If dictionary computation is desired, initialize compressor with the dictionary
                         cctx = zstd.ZstdCompressor(dict_data=bp1_dict, level=compression_level)
                     else:
                         cctx = zstd.ZstdCompressor(level=compression_level)
@@ -751,60 +740,6 @@ class SPARZIP:
                     compressor1.flush(zstd.FLUSH_FRAME)
             except Exception as e:
                 print(f"Error during compression: {e}")
-
-
-
-            # # with open(output_file1, 'wb') as f1:#, cctx.stream_writer(f1, write_size=32768) as compressor1:
-            # f1 = open(output_file1, 'wb')
-            # zdict_present = 1 if compute_dict else 0
-            # compressor1 = cctx.stream_writer(f1, write_size=32768)
-            # # with cctx.stream_writer(f1, write_size=32768) as compressor1:
-            # compressor1.write(np.array([zdict_present], dtype=np.uint8).tobytes())
-        
-            # if compute_dict:
-            #     compressor1.write(np.array([len(bp1_dict)], dtype=np.int32).tobytes())
-            #     compressor1.write(bp1_dict.as_bytes())
-
-            # shape_bytes = np.array(self.bp1[k].shape, dtype=np.int32).tobytes()
-            # compressor1.write(shape_bytes)
-
-            # dtype_bytes = np.array(str(self.bp1[k].dtype), dtype='S20').tobytes()
-            # compressor1.write(dtype_bytes)
-
-            # if compute_dict:
-            #     cctx = zstd.ZstdCompressor(dict_data=bp1_dict, level=compression_level)
-            #     compressor1 = cctx.stream_writer(f1, write_size=32768)
-            # # with cctx.stream_writer(f1, write_size=32768) as compressor1:
-            
-            # for chunk in self.bp1[k]:
-            #     compressor1.write(chunk.compute().tobytes())
-            # compressor1.flush(zstd.FLUSH_FRAME)
-            # f1.close()
-
-            # # with open(output_file2, 'wb') as f2: 
-            # f2 = open(output_file2, 'wb')
-            # # zdict_present = 1 if compute_dict else 0
-            # compressor2 = cctx_bp2.stream_writer(f2, write_size=32768)# as compressor2:              
-            # compressor2.write(np.array([zdict_present], dtype=np.uint8).tobytes())
-
-            # if compute_dict:
-            #     compressor2.write(np.array([len(bp2_dict)], dtype=np.int32).tobytes())
-            #     compressor2.write(bp2_dict.as_bytes())
-
-            # shape_bytes = np.array(self.bp2[k].shape, dtype=np.int32).tobytes()
-            # compressor2.write(shape_bytes)
-            
-            # dtype_bytes = np.array(str(self.bp2[k].dtype), dtype='S20').tobytes()
-            # compressor2.write(dtype_bytes)
-
-            # if compute_dict:
-            #     cctx_bp2 = zstd.ZstdCompressor(dict_data=bp2_dict, level=compression_level)
-            #     compressor2 = cctx_bp2.stream_writer(f2, write_size=32768)
-
-            # for chunk in self.bp2[k]:
-            #     compressor2.write(chunk.compute().tobytes())
-            # compressor2.flush(zstd.FLUSH_FRAME)
-            # f2.close()
 
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
@@ -930,7 +865,7 @@ class SPARUNZIP:
 
         if path_bp2:
             files_bp2 = sorted(glob.glob(path_bp2))
-            self.path_bp2 = files_bp2
+            self.path_encoded_bp2 = files_bp2
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp2 = []
             for file_path in files_bp2:
@@ -965,125 +900,6 @@ class SPARUNZIP:
                     bp2.append(da.from_array(data_array))
 
         return bp1, None if path_bp2 is None else bp2
-
-
-    # def decode_zst(self, path_bp1: str, path_bp2: str = None):
-
-    #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-
-    #     # if self.use_zstd_dict:
-    #     #     zstd_dict_bp1 = os.path.splitext(files_bp1[0])[0].split("_level")[0]
-    #     #     zstd_bp1_name = f'{zstd_dict_bp1}.zdict'
-    #     #     assert os.path.exists(zstd_bp1_name), 'Error: Zstandard for bp1 dictionary not found.'
-    #     #     with open(zstd_bp1_name, 'rb') as f:
-    #     #         zstd_dict_bp1 = zstd.ZstdCompressionDict(f.read())
-    #     #     if path_bp2 is not None:
-    #     #         self.encoded_bp2_files = sorted(glob.glob(path_bp2))
-    #     #         zstd_dict_bp2 = os.path.splitext(self.encoded_bp2_files[0])[0].split("_level")[0]
-    #     #         zstd_bp2_name = f'{zstd_dict_bp2}.zdict'
-    #     #         assert os.path.exists(zstd_bp2_name), 'Error: Zstandard for bp2 dictionary not found.'
-    #     #         with open(zstd_bp2_name, 'rb') as f:
-    #     #             zstd_dict_bp2 = zstd.ZstdCompressionDict(f.read())
-
-    #     #     dctx_bp1 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp1)
-    #     #     dctx_bp2 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp2)
-            
-
-
-    #     bp1 = []
-    #     for file_path in files_bp1:
-    #         dctx_bp1 = zstd.ZstdDecompressor()
-    #         with open(file_path, 'rb') as f2:#, dctx_bp1.stream_reader(f2) as decomp:
-    #             zdict_present = np.frombuffer(f2.read(1), dtype=np.uint8)[0]
-    #             print(zdict_present)
-    #             if zdict_present:
-    #                 # Read the length of the zdict
-    #                 zdict_length = np.frombuffer(f2.read(4), dtype=np.int32)[0]
-
-    #                 # Read the zdict itself
-    #                 zdict = f2.read(zdict_length)
-    #                 zstd_dict_bp1 = zstd.ZstdCompressionDict(zdict)
-    #                 dctx_bp1 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp1)
-    #                 # Adjust the start of the actual data
-    #                 start_of_data = 5 + zdict_length
-    #             else:
-    #                 # If no zdict, the actual data starts after the flag
-    #                 start_of_data = 1
-    #                 # dctx_bp1 = zstd.ZstdDecompressor()
-
-    #         with open(file_path, 'rb') as fh, dctx_bp1.stream_reader(fh) as reader:
-    #             decompressed_data = reader.read()
-            
-    #         data_shape = np.frombuffer(decompressed_data[start_of_data:start_of_data+12], dtype=np.int32)
-    #         dtype_str = np.frombuffer(decompressed_data[start_of_data+12:start_of_data+32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
-
-    #         data_dtype = np.dtype(dtype_str)
-
-    #         data_array = np.frombuffer(decompressed_data[start_of_data+32:], dtype=data_dtype).reshape(data_shape)
-    #         bp1.append(da.from_array(data_array))
-
-    #     if path_bp2:
-    #         files_bp2 = sorted(glob.glob(path_bp2))
-    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #         bp2 = []
-    #         for file_path in files_bp2:
-
-    #             dctx_bp2 = zstd.ZstdDecompressor()
-    #             with open(file_path, 'rb') as f2:#, dctx_bp2.stream_reader(f2) as decomp:
-    #                 zdict_present = np.frombuffer(f2.read(1), dtype=np.uint8)[0]
-
-    #                 if zdict_present:
-    #                     # Read the length of the zdict
-    #                     zdict_length = np.frombuffer(f2.read(4), dtype=np.int32)[0]
-
-    #                     # Read the zdict itself
-    #                     zdict = f2.read(zdict_length)
-    #                     zstd_dict_bp2 = zstd.ZstdCompressionDict(zdict)
-    #                     dctx_bp2 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp2)
-    #                     # Adjust the start of the actual data
-    #                     start_of_data = 5 + zdict_length
-    #                 else:
-    #                     # If no zdict, the actual data starts after the flag
-    #                     start_of_data = 1
-
-    #             with open(file_path, 'rb') as fh, dctx_bp2.stream_reader(fh) as reader:
-    #                 decompressed_data = reader.read()
-
-    #             data_shape = np.frombuffer(decompressed_data[:12], dtype=np.int32)
-    #             dtype_str = np.frombuffer(decompressed_data[12:32], dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
-
-    #             data_dtype = np.dtype(dtype_str)
-
-    #             data_array = np.frombuffer(decompressed_data[32:], dtype=data_dtype).reshape(data_shape)
-    #             bp2.append(da.from_array(data_array))
-    #         return bp1, bp2
-
-    #     return bp1, None
-        
-        # dctx = zstd.ZstdDecompressor()
-        # if path_bp2 is not None:
-        #     files_bp2 = sorted(glob.glob(path_bp2))
-        #     self.encoded_bp2_files = files_bp2
-        #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-        #     bp1, bp2 = [], []
-        #     for i in range(len(files_bp1)):
-        #         with open(files_bp1[i], 'rb') as fh:
-        #             decompressed_data = dctx.decompress(fh.read())
-        #         data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-        #         bp1.append(da.from_array(data_array))
-        #         with open(files_bp2[i], 'rb') as fh:
-        #             decompressed_data = dctx.decompress(fh.read())
-        #         data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-        #         bp2.append(da.from_array(data_array))
-        #     return bp1, bp2
-        # bp1 = []
-        # for i in range(len(files_bp1)):
-        #     with open(files_bp1[i], 'rb') as fh:
-        #         decompressed_data = dctx.decompress(fh.read())
-        #     data_array = np.frombuffer(decompressed_data, dtype=np.float32)
-        #     bp1.append(da.from_array(data_array))
-        # return bp1, None
         
 
     def process_frames(self):
