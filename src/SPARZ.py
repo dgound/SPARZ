@@ -769,10 +769,14 @@ class SPARUNZIP:
                  num_dask_workers:int=2):
         
         # self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
-        self.path_encoded_bp1, self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp1)), None
+        self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
+        self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+        # if path_encoded_bp2 is not None:
+        #     self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
+        # else:
+        #     self.path_encoded_bp2 = None
         # self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
-        # self.use_zstd_dict = use_zstd_dict
-
+        # self.use_zstd_dict = use_zstd_dict)
         if os.path.splitext(self.path_encoded_bp1[0])[1] == '.zst':
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
         else:
@@ -809,10 +813,10 @@ class SPARUNZIP:
     
     def decode(self, path_bp1:str, path_bp2:str):
         print('Decoding images...')
-        files_bp1 = path_bp1
+        files_bp1 = sorted(glob.glob(path_bp1))
         if path_bp2 is not None:
             files_bp2 = sorted(glob.glob(path_bp2))
-            self.encoded_bp2_files = files_bp2
+            # self.encoded_bp2_files = files_bp2
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp1, bp2 = [], []
             for i in range(len(files_bp1)):
@@ -1003,26 +1007,26 @@ class SPARUNZIP:
                         progress_bar.close()
         print('Done.')
 
-# %%
-bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
-bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
-# %%
-z=SPARZIP(path_image_files1=bp1,
-           path_image_files2=bp2,
-           output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-           stem='test',
-           find_peaks=False)
-# %%
-z.run(codec='zstd',compute_zstd_dict=True,compression_level=0)
-# %%
-u=SPARUNZIP(path_sparse_bp1=None,
-            path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_level_0.zst',
-            stem='zstd',
-            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-            path_sparse_bp2=None,
-            path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_level_0.zst',
-            use_roi=False)
-# %%
-u.run()
+# # %%
+# bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+# # %%
+# z=SPARZIP(path_image_files1=bp1,
+#            path_image_files2=bp2,
+#            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+#            stem='test',
+#            find_peaks=True)
+# # %%
+# z.run(codec='x264',compute_zstd_dict=False,compression_level=0)
+# # %%
+# u=SPARUNZIP(path_sparse_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.npz',
+#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_compression_level_0.mp4',
+#             stem='x264',
+#             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+#             path_sparse_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.npz',
+#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_compression_level_0.mp4',
+#             use_roi=True)
+# # %%
+# u.run()
 
-# %%
+# # %%
