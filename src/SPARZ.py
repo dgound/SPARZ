@@ -692,11 +692,9 @@ class SPARZIP:
                     
                     # Serialize and compress array shape and dtype
                     shape_bytes = np.array(self.bp1[k].shape, dtype=np.int32).tobytes()
-                    print ('shape_bytes:',len(shape_bytes))
                     f1.write(shape_bytes)
                     
                     dtype_bytes = np.array(str(self.bp1[k].dtype), dtype='S20').tobytes()
-                    print ('dtype_bytes:',len(dtype_bytes))
                     f1.write(dtype_bytes)
                     
                     # Compress data chunks
@@ -743,7 +741,15 @@ class SPARZIP:
 
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
-        if (self.find_roi) and (codec !='zstd'):
+        if codec!='zstd' and compute_zstd_dict:
+            print ('Warning: Dictionary computation is only supported for Zstandard compression. Ignoring compute_zstd_dict flag.')
+            compute_zstd_dict = False
+        
+        if (self.find_roi) and (codec =='zstd'):
+            print ('Warning: ROI detection is not supported for Zstandard compression. Ignoring find_roi flag.')
+            self.find_roi = False
+            
+        if (self.find_roi):
             self.deflate()
             gc.collect()
         if codec in ['x265', 'av1', 'x264', 'ffv1', 'prores', 'user']:
@@ -1017,16 +1023,18 @@ class SPARUNZIP:
 #            stem='test',
 #            find_peaks=True)
 # # %%
-# z.run(codec='x264',compute_zstd_dict=False,compression_level=0)
+# z.run(codec='zstd',compute_zstd_dict=True,compression_level=0)
 # # %%
 # u=SPARUNZIP(path_sparse_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.npz',
 #             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_compression_level_0.mp4',
-#             stem='x264',
+#             stem='zstd_test',
 #             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
 #             path_sparse_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.npz',
 #             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_compression_level_0.mp4',
 #             use_roi=True)
 # # %%
 # u.run()
+
+# # # %%
 
 # # %%
