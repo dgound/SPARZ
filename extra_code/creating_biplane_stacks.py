@@ -50,9 +50,9 @@ def process_files_in_subfolder(uncompressed_folder, output_folder):
     bp1_file = None
     bp2_file = None
     for file in files:
-        if '-250' in file:
+        if '_bp1' in file:
             bp1_file = file
-        elif '+250' in file:
+        elif '_bp2' in file:
             bp2_file = file
 
     # Check if both files were found
@@ -69,7 +69,7 @@ def process_files_in_subfolder(uncompressed_folder, output_folder):
     # Define metadata
     
     print(f"Concatenated volume shape: {concatenated_volume.shape}")
-    output_filename = "sequence-MT0.N1.HD-BP.tif"
+    output_filename = "Nir_et_al.tif"
     save_volume_to_file(concatenated_volume, output_folder, output_filename)
 
 
@@ -85,7 +85,7 @@ def main(main_folder, output_main_folder):
         subfolder_path = os.path.join(main_folder, subfolder)
 
         # Define the path to the uncompressed folder
-        uncompressed_folder = os.path.join(subfolder_path, 'uncompressed')
+        uncompressed_folder = os.path.join(subfolder_path, 'decompressed')
         if not os.path.exists(uncompressed_folder):
             print(f"Uncompressed folder not found in {subfolder_path}. Skipping.")
             continue
@@ -98,6 +98,6 @@ def main(main_folder, output_main_folder):
 
 
 if __name__ == "__main__":
-    main_folder = "/Users/laurabreimann/Desktop/microtubule_data"
-    output_main_folder = "/Users/laurabreimann/Desktop/microtubule_data"
+    main_folder = "/Users/laurabreimann/Desktop/figure_1/nir_et_al"
+    output_main_folder = "/Users/laurabreimann/Desktop/figure_1/nir_et_al"
     main(main_folder, output_main_folder)
