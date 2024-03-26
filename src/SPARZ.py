@@ -819,44 +819,82 @@ class SPARUNZIP:
             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
         return bp1, None
 
+### generates too many files open error ###
+    # def load_mp4(self, file_path):
+    #     container = av.open(file_path)
+    #     frame_count = container.streams.video[0].frames
+    #     dtype = None
+
+    #     # Read the first frame to infer dtype
+    #     for packet in container.demux():
+    #         for frame in packet.decode():
+    #             first_frame = frame.to_ndarray(format='gray16le')
+    #             dtype = first_frame.dtype
+    #             break
+    #         if dtype is not None:
+    #             break
+
+    #     def frame_generator(file_path):
+    #         container = av.open(file_path)
+    #         video_stream = container.streams.video[0]
+
+    #         for frame_index, frame in enumerate(container.decode(video_stream)):
+    #             yield frame_index, frame
+        
+    #     def read_frame(i):
+    #         for index,frame in frame_generator(file_path):
+    #             if index == i:
+    #                 return frame.to_ndarray(format='gray16le')
+            
+    #     frames = [delayed(read_frame)(i) for i in range(frame_count)]
+
+    #     # Create Dask arrays for each frame
+    #     frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
+
+    #     # Concatenate frame arrays into a single Dask array
+    #     # video_array = da.concatenate(frame_arrays, axis=0)
+    #     video_array = da.stack(frame_arrays, axis=0)
+    #     # print('vv',video_array.shape)
+    #     return video_array
+######
 
     def load_mp4(self, file_path):
-        container = av.open(file_path)
-        frame_count = container.streams.video[0].frames
         dtype = None
+        frame_count = 0
+        first_frame = None
 
-        # Read the first frame to infer dtype
-        for packet in container.demux():
-            for frame in packet.decode():
-                first_frame = frame.to_ndarray(format='gray16le')
-                dtype = first_frame.dtype
-                break
-            if dtype is not None:
-                break
+        # Read the first frame to infer dtype and get frame count
+        with av.open(file_path) as container:
+            frame_count = container.streams.video[0].frames
+            for packet in container.demux():
+                for frame in packet.decode():
+                    first_frame = frame.to_ndarray(format='gray16le')
+                    dtype = first_frame.dtype
+                    break
+                if dtype is not None:
+                    break
 
         def frame_generator(file_path):
-            container = av.open(file_path)
-            video_stream = container.streams.video[0]
+            with av.open(file_path) as container:
+                video_stream = container.streams.video[0]
+                for frame_index, frame in enumerate(container.decode(video_stream)):
+                    yield frame_index, frame
 
-            for frame_index, frame in enumerate(container.decode(video_stream)):
-                yield frame_index, frame
-        
         def read_frame(i):
             for index,frame in frame_generator(file_path):
                 if index == i:
                     return frame.to_ndarray(format='gray16le')
-            
+
         frames = [delayed(read_frame)(i) for i in range(frame_count)]
 
         # Create Dask arrays for each frame
         frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
 
         # Concatenate frame arrays into a single Dask array
-        # video_array = da.concatenate(frame_arrays, axis=0)
         video_array = da.stack(frame_arrays, axis=0)
-        # print('vv',video_array.shape)
+
         return video_array
-    
+
     
     def decode(self, path_bp1: str, path_bp2: str):
         print('Decoding images...')
