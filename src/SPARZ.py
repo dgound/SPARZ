@@ -11,7 +11,7 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-from reader import imread as vimread
+# from reader import imread as vimread
 import dask
 from dask import compute
 import gc
@@ -25,6 +25,8 @@ from dask.diagnostics import ProgressBar
 # from concurrent.futures import ThreadPoolExecutor, as_completed
 import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
+import av
+import concurrent.futures
 
 #%%
 class SPARZIP:
@@ -816,24 +818,79 @@ class SPARUNZIP:
         for i in range(len(files_bp1)):
             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
         return bp1, None
+
+
+    def load_mp4(self, file_path):
+        container = av.open(file_path)
+        frame_count = container.streams.video[0].frames
+        dtype = None
+
+        # Read the first frame to infer dtype
+        for packet in container.demux():
+            for frame in packet.decode():
+                first_frame = frame.to_ndarray(format='gray16le')
+                dtype = first_frame.dtype
+                break
+            if dtype is not None:
+                break
+
+        def frame_generator(file_path):
+            container = av.open(file_path)
+            video_stream = container.streams.video[0]
+
+            for frame_index, frame in enumerate(container.decode(video_stream)):
+                yield frame_index, frame
+        
+        def read_frame(i):
+            for index,frame in frame_generator(file_path):
+                if index == i:
+                    return frame.to_ndarray(format='gray16le')
+            
+        frames = [delayed(read_frame)(i) for i in range(frame_count)]
+
+        # Create Dask arrays for each frame
+        frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
+
+        # Concatenate frame arrays into a single Dask array
+        # video_array = da.concatenate(frame_arrays, axis=0)
+        video_array = da.stack(frame_arrays, axis=0)
+        # print('vv',video_array.shape)
+        return video_array
     
-    def decode(self, path_bp1:str, path_bp2:str):
+    
+    def decode(self, path_bp1: str, path_bp2: str):
         print('Decoding images...')
-        files_bp1 = sorted(glob.glob(path_bp1))
-        if path_bp2 is not None:
-            files_bp2 = sorted(glob.glob(path_bp2))
-            # self.encoded_bp2_files = files_bp2
-            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-            bp1, bp2 = [], []
-            for i in range(len(files_bp1)):
-                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-                bp2.append(vimread(files_bp2[i], dtypes='uint16'))
-            return bp1, bp2
-        bp1 = []
-        for i in range(len(files_bp1)):
-            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-        return bp1, None
-        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
+        # files_bp1 = sorted(glob.glob(path_bp1))
+        files_bp1 = self.path_encoded_bp1
+        if self.path_encoded_bp2 is None:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+            return bp1, None
+        # files_bp2 = sorted(glob.glob(path_bp2))
+        files_bp2 = self.path_encoded_bp2
+        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+            bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
+        return bp1, bp2
+
+    # def decode(self, path_bp1:str, path_bp2:str):
+    #     print('Decoding images...')
+    #     files_bp1 = sorted(glob.glob(path_bp1))
+    #     if path_bp2 is not None:
+    #         files_bp2 = sorted(glob.glob(path_bp2))
+    #         # self.encoded_bp2_files = files_bp2
+    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+    #         bp1, bp2 = [], []
+    #         for i in range(len(files_bp1)):
+    #             bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+    #             bp2.append(vimread(files_bp2[i], dtypes='uint16'))
+    #         return bp1, bp2
+    #     bp1 = []
+    #     for i in range(len(files_bp1)):
+    #         bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+    #     return bp1, None
+    #     # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
 
     def decode_zst(self, path_bp1: str, path_bp2: str = None):
         print('Decoding images...')
