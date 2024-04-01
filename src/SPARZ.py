@@ -1061,6 +1061,8 @@ class SPARUNZIP:
                                 progress_bar2.update(self.chunk_size)
                     if show_progress_bar:
                         progress_bar2.close()
+
+                gc.collect()
                 
             
         else:
@@ -1106,6 +1108,7 @@ class SPARUNZIP:
                                 progress_bar.update(self.chunk_size)
                     if show_progress_bar:
                         progress_bar.close()
+                gc.collect()
         print('Done.')
 
 # # %%
