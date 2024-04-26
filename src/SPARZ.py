@@ -628,7 +628,7 @@ class SPARZIP:
         # Create a ffmpeg output with the writer arguments
         writer_args['s'] = input_dict['s']
         # with open(os.devnull, "w") as devnull:
-        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, **writer_args)
+        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, loglevel="quiet", **writer_args)
 
         # Run the ffmpeg command
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
@@ -779,7 +779,8 @@ class SPARUNZIP:
         # self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
         self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
-        # print('self.path_encoded_bp1',self.path_encoded_bp1)
+        self.use_roi = use_roi
+
         # if path_encoded_bp2 is not None:
         #     self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
         # else:
@@ -787,11 +788,14 @@ class SPARUNZIP:
         # self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
         # self.use_zstd_dict = use_zstd_dict)
         if os.path.splitext(self.path_encoded_bp1[0])[1] == '.zst':
+            if self.use_roi:
+                print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
+                self.use_roi = False
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
         else:
             self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
-        if use_roi:
+        if self.use_roi:
             self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
             # print ('Loaded sparse matrices.')
             # print (self.sparse_bp1)
@@ -807,7 +811,6 @@ class SPARUNZIP:
             self.output_path = output_path+"/"
         else:
             self.output_path = output_path
-        self.use_roi = use_roi
         self.chunk_size = chunk_size
 
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
