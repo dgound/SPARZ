@@ -11,7 +11,7 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-# from reader import imread as vimread
+from reader import imread as vimread
 import dask
 from dask import compute
 import gc
@@ -628,7 +628,7 @@ class SPARZIP:
         # Create a ffmpeg output with the writer arguments
         writer_args['s'] = input_dict['s']
         # with open(os.devnull, "w") as devnull:
-        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, **writer_args)
+        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, loglevel="quiet", **writer_args)
 
         # Run the ffmpeg command
         # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
@@ -779,6 +779,8 @@ class SPARUNZIP:
         # self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
         self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+        self.use_roi = use_roi
+
         # if path_encoded_bp2 is not None:
         #     self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
         # else:
@@ -786,13 +788,22 @@ class SPARUNZIP:
         # self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
         # self.use_zstd_dict = use_zstd_dict)
         if os.path.splitext(self.path_encoded_bp1[0])[1] == '.zst':
+            if self.use_roi:
+                print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
+                self.use_roi = False
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
         else:
             self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
-        if use_roi:
+        if self.use_roi:
             self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
+            # print ('Loaded sparse matrices.')
+            # print (self.sparse_bp1)
+            # print (self.sparse_bp1[0].shape)
             self.processed_bp1, self.processed_bp2 = self.process_frames()
+            # print ('Processed frames.')
+            # print (self.processed_bp1)
+            # print (self.processed_bp1[0].shape)
         self.stem = stem
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
@@ -800,7 +811,6 @@ class SPARUNZIP:
             self.output_path = output_path+"/"
         else:
             self.output_path = output_path
-        self.use_roi = use_roi
         self.chunk_size = chunk_size
 
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
@@ -819,116 +829,141 @@ class SPARUNZIP:
             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
         return bp1, None
 
-### generates too many files open error ###
-    # def load_mp4(self, file_path):
-    #     container = av.open(file_path)
-    #     frame_count = container.streams.video[0].frames
-    #     dtype = None
 
-    #     # Read the first frame to infer dtype
-    #     for packet in container.demux():
-    #         for frame in packet.decode():
-    #             first_frame = frame.to_ndarray(format='gray16le')
-    #             dtype = first_frame.dtype
-    #             break
-    #         if dtype is not None:
-    #             break
+    def load_mp4(self, file_path):
+        # Open the video file
+        container = av.open(file_path)
+        video_stream = container.streams.video[0]
+        frame_count = video_stream.frames
+
+        # Read all frames into a list of numpy arrays
+        @delayed
+        def read_frames():
+            frames = []
+            dtype = None
+            for frame in container.decode(video_stream):
+                np_frame = frame.to_ndarray(format='gray16le')
+                if dtype is None:
+                    dtype = np_frame.dtype  # Set dtype on first frame
+                frames.append(np_frame)
+            return np.array(frames), dtype
+    
+        @delayed
+        def read_frames_h264():
+            frames = []
+            for frame in container.decode(video_stream):
+                # Assuming conversion directly to 'gray16le' is handled elsewhere or not necessary
+                y_plane = frame.planes[0]
+                y_data = np.frombuffer(y_plane, np.uint16)
+                y_data = y_data.reshape((frame.height, frame.width))
+                y_data_16bit = np.left_shift(y_data, 6)
+                frames.append(y_data_16bit)
+            return np.array(frames), y_data_16bit.dtype
+            # return np.stack(frames, axis=0) 
+
+
+        # Get delayed frames and dtype
+        if video_stream.codec.name == 'h264':
+            print('H264 codec detected.')
+            frames_dtype = read_frames_h264()
+        else:
+            print(f'{video_stream.codec.name} codec detected.')
+            frames_dtype = read_frames()
+
+        # Calculate the shape and dtype of the frames for creating a Dask array
+        # Since the dtype and frames are in a single tuple, we need to compute them to extract properly
+        frames, dtype = frames_dtype.compute()
+
+        # Create a Dask array from the numpy array of frames
+        dask_frames = da.from_array(frames, chunks=(1, *frames[0].shape))
+        return dask_frames
+
+    def decode(self, path_bp1, path_bp2=None):
+        print('Decoding images...')
+        files_bp1 = sorted(glob.glob(path_bp1))
+        bp1 = [self.load_mp4(file) for file in files_bp1]
+        # print ('bp1',bp1[0])
+
+        bp2 = None
+        if path_bp2:
+            files_bp2 = sorted(glob.glob(path_bp2))
+            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+            bp2 = [self.load_mp4(file) for file in files_bp2]
+
+        return bp1, bp2
+
+
+    # def load_mp4(self, file_path):
+    #     dtype = None
+    #     frame_count = 0
+    #     first_frame = None
+
+    #     # Read the first frame to infer dtype and get frame count
+    #     with av.open(file_path) as container:
+    #         frame_count = container.streams.video[0].frames
+    #         for packet in container.demux():
+    #             for frame in packet.decode():
+    #                 first_frame = frame.to_ndarray(format='gray16le')
+    #                 dtype = first_frame.dtype
+    #                 break
+    #             if dtype is not None:
+    #                 break
 
     #     def frame_generator(file_path):
-    #         container = av.open(file_path)
-    #         video_stream = container.streams.video[0]
+    #         with av.open(file_path) as container:
+    #             video_stream = container.streams.video[0]
+    #             for frame_index, frame in enumerate(container.decode(video_stream)):
+    #                 yield frame_index, frame
 
-    #         for frame_index, frame in enumerate(container.decode(video_stream)):
-    #             yield frame_index, frame
-        
     #     def read_frame(i):
     #         for index,frame in frame_generator(file_path):
     #             if index == i:
     #                 return frame.to_ndarray(format='gray16le')
-            
+
     #     frames = [delayed(read_frame)(i) for i in range(frame_count)]
 
     #     # Create Dask arrays for each frame
     #     frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
 
     #     # Concatenate frame arrays into a single Dask array
-    #     # video_array = da.concatenate(frame_arrays, axis=0)
     #     video_array = da.stack(frame_arrays, axis=0)
-    #     # print('vv',video_array.shape)
+
     #     return video_array
-######
-
-    def load_mp4(self, file_path):
-        dtype = None
-        frame_count = 0
-        first_frame = None
-
-        # Read the first frame to infer dtype and get frame count
-        with av.open(file_path) as container:
-            frame_count = container.streams.video[0].frames
-            for packet in container.demux():
-                for frame in packet.decode():
-                    first_frame = frame.to_ndarray(format='gray16le')
-                    dtype = first_frame.dtype
-                    break
-                if dtype is not None:
-                    break
-
-        def frame_generator(file_path):
-            with av.open(file_path) as container:
-                video_stream = container.streams.video[0]
-                for frame_index, frame in enumerate(container.decode(video_stream)):
-                    yield frame_index, frame
-
-        def read_frame(i):
-            for index,frame in frame_generator(file_path):
-                if index == i:
-                    return frame.to_ndarray(format='gray16le')
-
-        frames = [delayed(read_frame)(i) for i in range(frame_count)]
-
-        # Create Dask arrays for each frame
-        frame_arrays = [da.from_delayed(frame, shape=first_frame.shape, dtype=dtype) for frame in frames]
-
-        # Concatenate frame arrays into a single Dask array
-        video_array = da.stack(frame_arrays, axis=0)
-
-        return video_array
 
     
-    def decode(self, path_bp1: str, path_bp2: str):
-        print('Decoding images...')
-        # files_bp1 = sorted(glob.glob(path_bp1))
-        files_bp1 = self.path_encoded_bp1
-        if self.path_encoded_bp2 is None:
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
-            return bp1, None
-        # files_bp2 = sorted(glob.glob(path_bp2))
-        files_bp2 = self.path_encoded_bp2
-        assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
-            bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
-        return bp1, bp2
-
-    # def decode(self, path_bp1:str, path_bp2:str):
+    # def decode(self, path_bp1: str, path_bp2: str):
     #     print('Decoding images...')
-    #     files_bp1 = sorted(glob.glob(path_bp1))
-    #     if path_bp2 is not None:
-    #         files_bp2 = sorted(glob.glob(path_bp2))
-    #         # self.encoded_bp2_files = files_bp2
-    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-    #         bp1, bp2 = [], []
-    #         for i in range(len(files_bp1)):
-    #             bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-    #             bp2.append(vimread(files_bp2[i], dtypes='uint16'))
-    #         return bp1, bp2
-    #     bp1 = []
-    #     for i in range(len(files_bp1)):
-    #         bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-    #     return bp1, None
-    #     # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
+    #     # files_bp1 = sorted(glob.glob(path_bp1))
+    #     files_bp1 = self.path_encoded_bp1
+    #     if self.path_encoded_bp2 is None:
+    #         with concurrent.futures.ThreadPoolExecutor() as executor:
+    #             bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+    #         return bp1, None
+    #     # files_bp2 = sorted(glob.glob(path_bp2))
+    #     files_bp2 = self.path_encoded_bp2
+    #     assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+    #     with concurrent.futures.ThreadPoolExecutor() as executor:
+    #         bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
+    #         bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
+    #     return bp1, bp2
+
+    def decode_fallback(self, path_bp1:str, path_bp2:str):
+        print('Decoding images...')
+        files_bp1 = sorted(glob.glob(path_bp1))
+        if path_bp2 is not None:
+            files_bp2 = sorted(glob.glob(path_bp2))
+            # self.encoded_bp2_files = files_bp2
+            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+            bp1, bp2 = [], []
+            for i in range(len(files_bp1)):
+                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+                bp2.append(vimread(files_bp2[i], dtypes='uint16'))
+            return bp1, bp2
+        bp1 = []
+        for i in range(len(files_bp1)):
+            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
+        return bp1, None
+        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
 
     def decode_zst(self, path_bp1: str, path_bp2: str = None):
         print('Decoding images...')
@@ -1091,7 +1126,7 @@ class SPARUNZIP:
                     progress_bar.close()
                 if self.encoded_bp2 is not None:
                     # if type(self.path_encoded_bp2) == list:
-                    print ('encoded_bp2:',self.path_encoded_bp2)
+                    # print ('encoded_bp2:',self.path_encoded_bp2)
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
                     # else:
                         # input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2))[1])[0]
@@ -1111,28 +1146,182 @@ class SPARUNZIP:
                 gc.collect()
         print('Done.')
 
-# # %%
-# bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.tif'
-# bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.tif'
-# # %%
+# %%
+# bp1='/Users/dimos/raw_image_compression/nir_et_al/img_*_bp1.tiff'
+# bp2='/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
+# %%
+
+# bp1='/Users/dimos/SPARZ_fig1/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# bp2='/Users/dimos/SPARZ_fig1/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+
+# codec='prores'
+# extension='mov' if codec=='prores' else ('zst' if codec=='zstd' else ('avi' if codec=='ffv1' else 'mp4'))
+# print('extension:',extension)
+# ROI = 'with_ROI'
+# out=f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data'
+# sparsze = True if ROI =='with_ROI' else False
+# sparse_bp1 = f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*-250*.npz' if sparsze else None
+# sparse_bp2 = f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*+250*.npz' if sparsze else None
+# # sparse_bp1 = f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/img*bp1.npz' if sparsze else None
+# # sparse_bp2 = f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/img*bp2.npz' if sparsze else None
+
+
 # z=SPARZIP(path_image_files1=bp1,
 #            path_image_files2=bp2,
-#            output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
+#            output_path=out,
 #            stem='test',
-#            find_peaks=True)
+#            find_peaks=sparsze)
+# #%%
+# # z.run(codec=codec,compute_zstd_dict=False,compression_level=0)
 # # %%
-# z.run(codec='zstd',compute_zstd_dict=True,compression_level=0)
-# # %%
-# u=SPARUNZIP(path_sparse_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250.npz',
-#             path_encoded_bp1='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP-250_compression_level_0.mp4',
+# u=SPARUNZIP(path_sparse_bp1=sparse_bp1,
+#             path_encoded_bp1=f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*-250*.{extension}',
 #             stem='zstd_test',
-#             output_path='/Users/dimos/raw_image_compression/microtubule_for_figures/',
-#             path_sparse_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250.npz',
-#             path_encoded_bp2='/Users/dimos/raw_image_compression/microtubule_for_figures/sequence-as-stack-MT0.N1.HD-BP+250_compression_level_0.mp4',
-#             use_roi=True)
+#             output_path=out,
+#             path_sparse_bp2=sparse_bp2,
+#             path_encoded_bp2=f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*+250*.{extension}' if sparse else None,
+#             use_roi=sparsze)
 # # %%
 # u.run()
 
-# # # %%
+# # # # %%
 
 # # %%
+# u.decode(u.path_encoded_bp1,u.path_encoded_bp2)
+# # %%
+# m1=u.encoded_bp1[0].compute()
+# # %%
+# import matplotlib.pyplot as plt
+# plt.imshow(m1[0,:,:])
+# # %%
+# m = u.decode(u.path_encoded_bp1[0],None)
+# # %%
+# u.path_encoded_bp1
+# # %%
+# m[0][0].compute()
+
+# # %%
+# m1=m[0][0].compute()
+# # %%
+# import matplotlib.pyplot as plt
+# plt.imshow(m1[1,:,:])
+# # %%
+# files_bp1 = sorted(glob.glob(f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*-250*.{extension}'))
+# # bp1 = [self.load_mp4(file) for file in files_bp1]
+# # print ('bp1',bp1[0])
+# # %%
+# import matplotlib.pyplot as plt
+# plt.imshow(u.load_mp4(files_bp1[0])[100,:,:].compute())
+
+# # %%
+# u.load_mp4(files_bp1[0])[100,:,:].compute()
+# #%%
+# container = av.open(files_bp1[0])
+# #%%
+# video_stream = container.streams.video[0]
+# frame_count = video_stream.frames
+
+# for frame in container.decode(video_stream):
+#     print (frame)
+#     np_frame = frame.reformat(format='gray16le')
+#     np_frame = np.frombuffer(np_frame.planes[0], dtype=np.uint16)
+#     print(np_frame)
+#     break
+
+# #%%
+# def load_mp4(file_path):
+#     try:
+#         container = av.open(file_path)
+#     except av.AVError as e:
+#         print(f"Failed to open file {file_path}: {e}")
+#         return None
+
+#     video_stream = container.streams.video[0]
+#     frames = []
+
+#     for packet in container.demux(video_stream):
+#         for frame in packet.decode():
+#             try:
+#                 if 'yuv' in frame.format.name:
+#                     # Extract the Y plane (luminance)
+#                     y_plane = frame.to_ndarray()  # Extract Y component which is index 0
+#                     if '10le' in frame.format.name:
+#                         # Scale 10-bit values to 16-bit
+#                         y_plane_16bit = np.left_shift(y_plane.astype(np.uint16), 6)
+#                     else:
+#                         # Assuming it's 8-bit, scale to 16-bit
+#                         y_plane_16bit = np.left_shift(y_plane.astype(np.uint16), 8)
+#                     frames.append(y_plane_16bit)
+#                 else:
+#                     print(f"Unsupported frame format encountered: {frame.format.name}")
+#             except Exception as e:
+#                 print(f"Error processing frame: {e}")
+
+#     if not frames:
+#         print("No frames were processed. Check video format and stream contents.")
+#         return None
+
+#     # Stack frames into a single 3D numpy array
+#     video_data = np.stack(frames, axis=0)
+#     return video_data
+# #%%
+# ff=glob.glob(f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*-250*.{extension}')[0]
+# ff
+
+# #%%
+# # Usage
+# video_frames = load_mp4(ff)
+# if video_frames is not None:
+#     print("Video loaded and processed successfully.")
+# else:
+#     print("Failed to load or process video.")
+
+# # %%
+# # %%
+# def load_mp4(file_path):
+#     try:
+#         container = av.open(file_path)
+#     except av.AVError as e:
+#         print(f"Failed to open file {file_path}: {e}")
+#         return None
+
+#     video_stream = container.streams.video[0]
+#     frames = []
+
+#     for packet in container.demux(video_stream):
+#         for frame in packet.decode():
+#             if frame.format.name == 'yuv420p10le':
+#                 # Extract the Y plane data, which is the first plane.
+#                 y_plane = frame.planes[0]
+#                 # Convert the plane's buffer to a 1D numpy array of uint16 (safe cast since we're dealing with 10-bit data)
+#                 y_data = np.frombuffer(y_plane, np.uint16)
+                
+#                 # Reshape the data to match the height and width of the frame.
+#                 y_data = y_data.reshape((frame.height, frame.width))
+
+#                 # Scale 10-bit values to 16-bit
+#                 y_data_16bit = np.left_shift(y_data, 6)
+                
+#                 frames.append(y_data_16bit)
+#             else:
+#                 print(f"Unsupported frame format encountered: {frame.format.name}")
+
+#     if not frames:
+#         print("No frames were processed. Check video format and stream contents.")
+#         return None
+
+#     # Stack frames into a single 3D numpy array
+#     video_data = np.stack(frames, axis=0)
+#     return video_data
+
+# # Usage
+# video_frames = load_mp4(ff)
+# if video_frames is not None:
+#     print("Video loaded and processed successfully.")
+# else:
+#     print("Failed to load or process video.")
+# # %%
+# plt.imshow(video_frames[0,:,:])
+# # %%
+
+# %%
