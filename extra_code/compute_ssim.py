@@ -1,12 +1,16 @@
+#%%
 import os
 from skimage.metrics import structural_similarity as ssim
 import cv2
 import numpy as np
 
 # Define the directories
-codec='prores'
-raw_data_tiff_dir = '/mnt/altnas/work/dimos/raw_data_tiff'
-data_dir = f'/mnt/altnas/work/dimos/SPARZ_fig1/no_ROI/{codec}/images'
+codec='x265'
+# raw_data_tiff_dir = '/mnt/altnas/work/dimos/raw_data_tiff'
+# data_dir = f'/mnt/altnas/work/dimos/SPARZ_fig1/no_ROI/{codec}/images'
+data_dir = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/Nir_data_4_1_2024_optimized/no_ROI/x265_ROI_level_0'
+raw_data_tiff_dir = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/Nir_data_slow_non_optimized/no_ROI/x265_level_0/decompressed'
+
 
 def compute_average_ssim(raw_data_tiff_dir, data_dir):
     ssim_scores = []
@@ -46,7 +50,17 @@ def compute_average_ssim(raw_data_tiff_dir, data_dir):
     else:
         average_ssim = None
 
-    return average_ssim
+    return average_ssim, ssim_scores
 
-average_ssim = compute_average_ssim(raw_data_tiff_dir, data_dir)
+average_ssim, ssim_scores = compute_average_ssim(raw_data_tiff_dir, data_dir)
 print(f"{codec} Average SSIM: {average_ssim}")
+
+# %%
+import matplotlib.pyplot as plt
+fig, ax = plt.subplots()
+ax.hist(ssim_scores, bins=20)
+ax.set_xlabel('SSIM')
+ax.set_ylabel('Frequency')
+ax.set_title(f'{codec} SSIM Histogram')
+plt.show()
+# %%
