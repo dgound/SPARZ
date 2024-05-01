@@ -31,15 +31,16 @@ from sklearn.neighbors import NearestNeighbors
 
 # select the path of the data folder
 # path = '/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/'
-path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz_grid_search/'
+# path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz_grid_search/'
+path = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data'
 
 # find all .h5r files within the folder
 
-files = glob.glob(path + '**/*.h5r', recursive = True)
+files = glob.glob(path + '/**/*.h5r', recursive = True)
 
 # data name to assign to the output files
 data_name = 'synMT_vs_rawTP'
-date = '_20240207'
+date = '_20240501'
 
 #### filtering erroneous localizations outputed by PyME ####
 # Synth data filtering
@@ -332,7 +333,7 @@ for file in tqdm(files):
     distances_flat = distances_flat[~np.isnan(distances_flat)]
 
 
-    codec_label = os.path.basename(os.path.dirname(os.path.dirname(file)))
+    codec_label = os.path.basename(os.path.dirname(file)) #os.path.basename(os.path.dirname(os.path.dirname(file)))
     codec_name = codec_label + '_' + data_name + date
     df_to_append = pd.DataFrame({'distance': distances_flat, 'codec': [codec_name]*len(distances_flat),'label': [codec_label]*len(distances_flat)})
     df_out = pd.concat([df_out, df_to_append], ignore_index=True)
@@ -420,6 +421,7 @@ df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+'_metric
 #####################################################################
 
 #%%
+
 df_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'))
 df_stats_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'))
 
