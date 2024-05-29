@@ -10,9 +10,10 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 #%%
 # color pallete
-color_palette = {'av1' : '#8ECAE6',
+color_palette = {'SPARZ': '#0E92EE',
+                'av1' : '#8ECAE6',
                 'ffv1' : '#219EBC',
-                'x264' : '#023047',
+                'h264' : '#023047',
                 'prores' : '#817425',
                 'x265' : '#FFB703',
                 'zstd' : '#FB8500'
@@ -27,9 +28,14 @@ color_palette = {'av1' : '#8ECAE6',
 
 
 processing_time = pd.read_csv("/Users/alioutas/Downloads/run_times_no_ROI_tubulin.csv")
+
+processing_time['codec'] = processing_time['codec'].replace('x264', 'h264')
+
 processing_time['color_palette'] = processing_time['codec'].map(color_palette)
 
-#%%
+
+
+# %% PROCESSING  time ** WITHOUT ** ROI
 # Create two subplot barplots with the compression and decompression times
 fig, (ax0, ax1) = plt.subplots(figsize=(10, 7), ncols=2, sharey=False)
 
@@ -71,7 +77,7 @@ plt.tight_layout()
 plt.show()
 
 
-# %%
+# %% PROCESSING  time ** WITH ** ROI
 
 processing_time = pd.read_csv("/Users/alioutas/Downloads/run_times_with_ROI_tubulin.csv")
 processing_time['color_palette'] = processing_time['codec'].map(color_palette)
