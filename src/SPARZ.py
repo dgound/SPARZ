@@ -27,6 +27,7 @@ import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 import av
 import concurrent.futures
+import joblib
 
 #%%
 class SPARZIP:
@@ -362,6 +363,8 @@ class SPARZIP:
         print('Done.')
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
     
+    def compress_joblib(self,path,mat):
+        joblib.dump(mat, path, compress=('lzma', 9))
 
 
     def deflate(self):
@@ -379,10 +382,10 @@ class SPARZIP:
                 # Directly append delayed save_npz operations to the list
                 flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
                 # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
-                saves.append(delayed(sparse.save_npz)(self.output_path+flnm1+'.npz',self.processed_bp1[i]))
+                saves.append(delayed(self.compress_joblib)(self.output_path+flnm1+'.sparz',self.processed_bp1[i]))
                 if self.single_plane == False:
                     flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
-                    saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
+                    saves.append(delayed(self.compress_joblib)(self.output_path+flnm2+'.sparz',self.processed_bp2[i]))
                     # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
             if show_progress_bar:
@@ -796,7 +799,7 @@ class SPARUNZIP:
             self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         if self.use_roi:
-            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
+            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2)
             # print ('Loaded sparse matrices.')
             # print (self.sparse_bp1)
             # print (self.sparse_bp1[0].shape)
@@ -813,21 +816,41 @@ class SPARUNZIP:
             self.output_path = output_path
         self.chunk_size = chunk_size
 
-    def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
+    def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
         print ('Loading sparse matrices...')
-        files_bp1 = sorted(glob.glob(sparse_bp1))
-        if sparse_bp2 is not None:
-            files_bp2 = sorted(glob.glob(sparse_bp2))
+        files_bp1 = sorted(glob.glob(path_sparse_bp1))
+        if path_sparse_bp2 is not None:
+            files_bp2 = sorted(glob.glob(path_sparse_bp2))
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp1,bp2 = [],[]
             for i in range(len(files_bp1)):
-                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-                bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+                try:
+                    bp1.append(joblib.load(files_bp1[i]))
+                    bp2.append(joblib.load(files_bp2[i]))
+                except Exception as e:
+                    print(f'Error loading sparse matrices: {e}')
+                    print(f'File: {files_bp1[i]}')
             return bp1, bp2
         bp1 =[]
         for i in range(len(files_bp1)):
-            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            bp1.append(joblib.load(files_bp1[i]))
         return bp1, None
+
+    # def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
+    #     print ('Loading sparse matrices...')
+    #     files_bp1 = sorted(glob.glob(sparse_bp1))
+    #     if sparse_bp2 is not None:
+    #         files_bp2 = sorted(glob.glob(sparse_bp2))
+    #         assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
+    #         bp1,bp2 = [],[]
+    #         for i in range(len(files_bp1)):
+    #             bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+    #             bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+    #         return bp1, bp2
+    #     bp1 =[]
+    #     for i in range(len(files_bp1)):
+    #         bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+    #     return bp1, None
 
 
     def load_mp4(self, file_path):
@@ -865,7 +888,7 @@ class SPARUNZIP:
         # Get delayed frames and dtype
         if video_stream.codec.name == 'h264':
             print('H264 codec detected.')
-            frames_dtype = read_frames_h264()
+            frames_dtype = read_frames()
         else:
             print(f'{video_stream.codec.name} codec detected.')
             frames_dtype = read_frames()
