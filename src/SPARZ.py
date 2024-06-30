@@ -381,12 +381,14 @@ class SPARZIP:
             for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
                 flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
-                saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
+                # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
+                saves.append(delayed(sparse.save_npz)(self.output_path+flnm1+'.npz',self.processed_bp1[i]))
                 # saves.append(delayed(self.compress_joblib)(self.output_path+flnm1+'.sparz',self.processed_bp1[i]))
                 if self.single_plane == False:
                     flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
                     # saves.append(delayed(self.compress_joblib)(self.output_path+flnm2+'.sparz',self.processed_bp2[i]))
-                    saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
+                    # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
+                    saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
             if show_progress_bar:
                 progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
