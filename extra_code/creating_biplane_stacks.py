@@ -98,6 +98,6 @@ def main(main_folder, output_main_folder):
 
 
 if __name__ == "__main__":
-    main_folder = "/Users/laurabreimann/Desktop/figure_1/nir_et_al"
-    output_main_folder = "/Users/laurabreimann/Desktop/figure_1/nir_et_al"
+    main_folder = "/Volumes/T9/compression/Data_for_figures/figure_3/data_for_localization"
+    output_main_folder = "/Volumes/T9/compression/Data_for_figures/figure_3/data_for_localization"
     main(main_folder, output_main_folder)

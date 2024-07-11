@@ -35,7 +35,7 @@ def concat_images(image_pair):
 
 
 # Path to the folder containing subfolders with images
-main_folder = '/Users/laurabreimann/Desktop/microtubule_data'
+main_folder = '/Volumes/T9/compression/figure_3/data_for_localization'
 
 
 # Iterate over each subfolder in the main folder

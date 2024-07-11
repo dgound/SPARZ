@@ -66,8 +66,8 @@ def save_stack_as_tiff(stack, output_path):
 
 if __name__ == '__main__':
     # Define input and output folders
-    input_folder = '/Users/laurabreimann/Desktop/figure_1/nir_et_al/zstd_level_0/decompressed/BP2'
-    output_folder = '/Users/laurabreimann/Desktop/figure_1/nir_et_al/zstd_level_0/decompressed'
+    input_folder = '/Volumes/T9/compression/Data_for_figures/figure_3/data_for_localization/k7_rt55_lev2/uncompressed/bp2'
+    output_folder = '/Volumes/T9/compression/Data_for_figures/figure_3/data_for_localization/k7_rt55_lev2/decompressed'
     output_filename = 'Nir_et_al_bp2.tif'
     
     # Ensure the output folder exists
