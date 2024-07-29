@@ -9,15 +9,17 @@ import seaborn as sns
 
 #%%
 # color pallete
-color_palette = {'SPARZ': '#0E92EE',
-                'av1' : '#8ECAE6',
-                'ffv1' : '#219EBC',
-                'h264' : '#023047',
-                'prores' : '#817425',
-                'x265' : '#FFB703',
-                'zstd' : '#FB8500'
-                }
+color_palette = {
+    'SPARZ': '#0E92EE',
+    'h264': '#8ECAE6',
+    'prores': '#219EBC',
+    'av1': '#023047',
+    'x265': '#817425',
+    'ffv1': '#FFB703',
+    'zstd': '#FB8500'
+}
 
+order = ['SPARZ', 'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 
 
 ############################################################################################
@@ -38,7 +40,6 @@ nn_distances['color_palette'] = nn_distances['label'].map(color_palette)
 #%%
 # boxplot the NN distances for each label and color it by the color palette column
 # define the order of the labels
-order = ['SPARZ', 'av1', 'ffv1', 'prores', 'h264', 'x265', 'zstd']
 sns.boxplot(data=nn_distances, x='label', y='distance', palette=color_palette, flierprops = dict(marker='.', markerfacecolor='None', markersize=2,  markeredgecolor='black'), order=order)
 # make y axis tart at -10
 # plt.ylim(nn_distances.distance.min(), nn_distances.distance.max())
@@ -69,7 +70,6 @@ jaccard['color_palette'] = jaccard['label'].map(color_palette)
 
 #%%
 # boxplot the NN distances for each label and color it by the color palette column
-order = ['SPARZ', 'av1', 'ffv1', 'prores', 'h264', 'x265', 'zstd']
 sns.stripplot(data=jaccard, x='label', y='value', palette=color_palette, size = 15, order = order)
 plt.ylabel('Jaccard index')
 plt.xlabel('')

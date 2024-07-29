@@ -10,14 +10,17 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 #%%
 # color pallete
-color_palette = {'SPARZ': '#0E92EE',
-                'av1' : '#8ECAE6',
-                'ffv1' : '#219EBC',
-                'h264' : '#023047',
-                'prores' : '#817425',
-                'x265' : '#FFB703',
-                'zstd' : '#FB8500'
-                }
+color_palette = {
+    # 'SPARZ': '#0E92EE',
+    'h264': '#8ECAE6',
+    'prores': '#219EBC',
+    'av1': '#023047',
+    'x265': '#817425',
+    'ffv1': '#FFB703',
+    'zstd': '#FB8500'
+}
+
+order = ['h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 
 
 #%%
@@ -28,10 +31,16 @@ color_palette = {'SPARZ': '#0E92EE',
 
 
 processing_time = pd.read_csv("/Users/alioutas/Downloads/run_times_no_ROI_tubulin.csv")
+# processing_time = pd.read_csv("/Users/alioutas/Downloads/run_times_with_ROI_tubulin.csv")
+
 
 processing_time['codec'] = processing_time['codec'].replace('x264', 'h264')
 
 processing_time['color_palette'] = processing_time['codec'].map(color_palette)
+
+# Sort the data by the specified order
+processing_time['codec'] = pd.Categorical(processing_time['codec'], categories=order, ordered=True)
+processing_time = processing_time.sort_values('codec')
 
 
 
@@ -77,22 +86,3 @@ plt.tight_layout()
 plt.show()
 
 
-# %% PROCESSING  time ** WITH ** ROI
-
-processing_time = pd.read_csv("/Users/alioutas/Downloads/run_times_with_ROI_tubulin.csv")
-processing_time['color_palette'] = processing_time['codec'].map(color_palette)
-
-#%%
-# dot plot the processing time
-fig, ax = plt.subplots()
-codec = 'av1'  # Define the value of codec
-ax.scatter(data=processing_time, x='codec', y='compression_mean', color='color_palette', marker='o', s =250)  # Remove duplicate 'color' keyword argument
-ax.errorbar(data=processing_time, x='codec', y='compression_mean', yerr='compression_std_dev', fmt='o', color='black', capsize=10)
-
-ax.set_ylabel('Processing time (s)')
-# ax.set_yticks([])
-ax.set_title('Processing times SPARZ')
-plt.show()
-
-
-# %%

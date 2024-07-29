@@ -53,19 +53,19 @@ for folder in sorted(os.listdir(main_folder), key=natural_sort_key):
         }
 
 
-#%% PLOT
+#%%
 # Define color palette
+
 color_palette = {
     # 'SPARZ': '#0E92EE',
-    'av1': '#8ECAE6',
-    'ffv1': '#219EBC',
-    'h264': '#023047',
-    'prores': '#817425',
-    'x265': '#FFB703',
+    'h264': '#8ECAE6',
+    'prores': '#219EBC',
+    'av1': '#023047',
+    'x265': '#817425',
+    'ffv1': '#FFB703',
     'zstd': '#FB8500'
 }
-
-
+#%%
 # Create DataFrame from results
 ssim_output = pd.DataFrame(results).T.reset_index()
 ssim_output.columns = ['label', 'median_ssim', 'file_size_percentage']
@@ -77,17 +77,26 @@ ssim_output['color_palette'] = ssim_output['label'].map(color_palette)
 
 # Round file size percentage
 ssim_output['file_size_percentage'] = np.round(ssim_output['file_size_percentage'], 2)
-
+# save the datatable
 ssim_output.to_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv', index=False)
 
-# Define the order of labels
-order = ['av1', 'ffv1', 'prores', 'h264', 'x265', 'zstd']
 
+#%% PLOT
+
+#%%
+# read ssim results
+ssim_output = pd.read_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv')
+
+
+
+#%%
+# Define the order of labels
+order = ['h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 # Create the stripplot
 sns.stripplot(data=ssim_output, x='file_size_percentage', y='median_ssim', hue='label', palette=color_palette, size=15, hue_order=order)
 plt.ylabel('Median SSIM Score')
+plt.xlabel('File Size (%)')
 plt.ylim(0.7, 1.009)
-plt.xlabel('')
 plt.legend(title='Codec')
 
 # save plot  as png
@@ -96,3 +105,5 @@ plt.savefig(output_file, format='pdf')
 
 # Show the plot
 plt.show()
+
+# %%
