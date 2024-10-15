@@ -11,14 +11,17 @@ import os
 from tqdm import tqdm
 
 # Paths for input files
-path1 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-stack-MT0.N1.HD-BP+250.tif'
-path2 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# path1 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+# path2 = '/Users/laurabreimann/Documents/Postdoc/Colabs/Compression/sequence-as-stack-MT0.N1.HD-BP-250.tif'
 
-stem= 'MT0'
+path1='/Users/dimos/SPARZ_fig1/nir_data/raw_data_tiff/*bp1.tiff'
+path2='/Users/dimos/SPARZ_fig1/nir_data/raw_data_tiff/*bp2.tiff'
+
+stem= 'Nir_et_all'
 
 # Define ranges for grid search
-kernel_sizes =  range(5, 12, 2) #  5, 7, 9, 11 
-rel_thresholds = [0.35, 0.45, 0.55, 0.65]  # 0.35, 0.45, 0.55, 0.65
+kernel_sizes =  [7, 9, 11, 13] #  5, 7, 9, 11 
+rel_thresholds = [0.55]  # 0.35, 0.45, 0.55, 0.65
 compression_levels = [0, 1, 2, 3]  # 0, 1, 2, 3
 
 
@@ -37,7 +40,7 @@ with tqdm(total=total_iterations, desc="Grid Search Progress", unit="iteration")
         for rel_thresh in rel_thresholds:
             for compression_level in compression_levels:
                 # Create output paths based on parameters
-                output_path = f'/Users/laurabreimann/Desktop/microtubule_data/sparz_k{kernel_size}_rt{int(rel_thresh*100)}_lev{compression_level}'
+                output_path = f'/Users/dimos/SPARZ_grid_search/sparz_k{kernel_size}_rt{int(rel_thresh*100)}_lev{compression_level}'
                 uncompressed_path = os.path.join(output_path, 'uncompressed')
                 os.makedirs(uncompressed_path, exist_ok=True)
 

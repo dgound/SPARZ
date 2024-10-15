@@ -779,12 +779,17 @@ class SPARUNZIP:
                  use_roi:bool=True, 
                  chunk_size:int=10, 
                  num_workers:int=4, 
-                 num_dask_workers:int=2):
+                 num_dask_workers:int=2,
+                 output_format: str = 'tiff'):
         
         # self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
         self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
         self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
         self.use_roi = use_roi
+
+        self.output_format = output_format.lower()
+        if self.output_format not in ['tiff', 'dat']:
+            raise ValueError("output_format must be either 'tiff' or 'dat'")
 
         # if path_encoded_bp2 is not None:
         #     self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
@@ -1074,6 +1079,25 @@ class SPARUNZIP:
         return [da.where(self.sparse_bp1[i]!=0,self.sparse_bp1[i],self.encoded_bp1[i]) for i in range(len(self.encoded_bp1))], [da.where(self.sparse_bp2[j]!=0,self.sparse_bp2[j],self.encoded_bp2[j])for j in range(len(self.encoded_bp2))]
 
 
+    def save_as_dat(self, frames, filename, dtype='uint16'):
+        """
+        Save frames to a .dat file using numpy.memmap.
+
+        Parameters:
+            frames (dask.array): Dask array containing the frames to save.
+            filename (str): Path to the output .dat file.
+            dtype (str): Data type of the frames.
+        """
+        # Ensure the dtype is supported
+        dtype = np.dtype(dtype)
+        
+        dtype = np.dtype(dtype)
+        with open(filename, 'wb') as f:
+            # Iterate over frames in chunks
+            for i in range(0, frames.shape[0], self.chunk_size):
+                chunk = frames[i:i + self.chunk_size].compute()
+                f.write(chunk.tobytes())
+
 
     def run(self):
         print('Inflating images...')
@@ -1093,34 +1117,52 @@ class SPARUNZIP:
                 num_frames = self.processed_bp1[k].shape[0]
 
                 input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp1[k]))[1])[0]
-                filename1 = f'{self.output_path}{self.stem}_{input_file_name1}.tiff'
+                output_filename1 = f'{self.output_path}{self.stem}_{input_file_name1}'
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
+                if self.output_format == 'tiff':
+                    tiff_filename1 = f'{output_filename1}.tiff'
+                    with tifffile.TiffWriter(tiff_filename1, bigtiff=True) as tif:
 
-                with tifffile.TiffWriter(filename1, bigtiff=True) as tif:
-
-                    for i in range(0, num_frames, self.chunk_size):
-                        chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
-                        for frame in chunk:
-                            tif.write(frame, photometric='minisblack')
-                        if show_progress_bar:
-                            progress_bar1.update(self.chunk_size)
-                if show_progress_bar:
-                    progress_bar1.close()
-                if self.encoded_bp2 is not None:
-                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
-                    filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
-                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
-                    with tifffile.TiffWriter(filename2, bigtiff=True) as tif:
-                        if show_progress_bar:
-                            progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
                         for i in range(0, num_frames, self.chunk_size):
-                            chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                            chunk = self.processed_bp1[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
                             for frame in chunk:
                                 tif.write(frame, photometric='minisblack')
                             if show_progress_bar:
-                                progress_bar2.update(self.chunk_size)
+                                progress_bar1.update(self.chunk_size)
                     if show_progress_bar:
-                        progress_bar2.close()
+                        progress_bar1.close()
+                elif self.output_format == 'dat':
+                    dat_filename1 = f'{output_filename1}.dat'
+                    self.save_as_dat(self.processed_bp1[k], dat_filename1)
+                    if show_progress_bar:
+                        progress_bar1.update(num_frames)
+                    if show_progress_bar:
+                        progress_bar1.close()
+
+                if self.encoded_bp2 is not None:
+                    input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
+                    output_filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
+                    if self.output_format == 'tiff':
+                        tiff_filename2 = f'{output_filename2}.tiff'
+                        with tifffile.TiffWriter(tiff_filename2, bigtiff=True) as tif:
+                            if show_progress_bar:
+                                progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
+                            for i in range(0, num_frames, self.chunk_size):
+                                chunk = self.processed_bp2[k][i:i+self.chunk_size].compute()  # Compute a chunk of frames
+                                for frame in chunk:
+                                    tif.write(frame, photometric='minisblack')
+                                if show_progress_bar:
+                                    progress_bar2.update(self.chunk_size)
+                        if show_progress_bar:
+                            progress_bar2.close()
+                    elif self.output_format == 'dat':
+                        dat_filename2 = f'{output_filename2}.dat'
+                        self.save_as_dat(self.processed_bp2[k], dat_filename2)
+                        if show_progress_bar:
+                            progress_bar2.update(num_frames)
+                        if show_progress_bar:
+                            progress_bar2.close()
 
                 gc.collect()
                 

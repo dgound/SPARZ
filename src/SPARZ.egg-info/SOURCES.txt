@@ -1,6 +1,7 @@
 README.md
 setup.py
 src/SPARZ.py
+src/make_data.py
 src/reader.py
 src/SPARZ.egg-info/PKG-INFO
 src/SPARZ.egg-info/SOURCES.txt

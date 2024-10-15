@@ -5,5 +5,17 @@ Summary: Compress Single Molecule Localization Microscopy Data
 Home-page: https://github.com/your_username/your_package
 Author: Dimos Gkountaroulis, Antonios Lioutas, Lian Jiang, and Laura Breimann
 Author-email: dimos.gkountaroulis@bcm.edu
+Requires-Dist: numpy
+Requires-Dist: scikit-image
+Requires-Dist: scipy
+Requires-Dist: dask
+Requires-Dist: dask-image
+Requires-Dist: matplotlib
+Requires-Dist: scikit-video
+Requires-Dist: tifffile
+Requires-Dist: pims
+Requires-Dist: sparse
+Requires-Dist: av
+Requires-Dist: jinja2
 
 Compression of Single Molecule Localization Microscopy Data using Sparse matrices and h265 video compression
