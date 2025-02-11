@@ -327,29 +327,17 @@ class SPARZIP:
             return self.processed_bp2[index].blocks[start_frame:end_frame,0].compute().todense()
 
     def median_patch(self, block):
-        """
-        Given a NumPy array block of shape (n_frames, height, width),
-        this function processes each frame: for each detected peak (using self.find_peaks),
-        it defines a square kernel of size self.kernel_size centered on the peak,
-        computes the median of that kernel region, and replaces the pixels in that region
-        with that median value. Pixels outside any kernel remain unchanged.
-        """
-        # Make a copy of the block so that we do not modify the original data in place
         new_block = np.copy(block)
         for i in range(block.shape[0]):
             frame = block[i]
-            # Detect peaks in the frame using your existing method
             peaks = self.find_peaks(frame, self.kernel_size, min_distance=1)
             for (r, c) in peaks:
                 half_k = self.kernel_size // 2
-                # Compute the kernel boundaries (clipping to image borders)
                 r_start = max(r - half_k, 0)
                 r_end = min(r + half_k + 1, frame.shape[0])
                 c_start = max(c - half_k, 0)
                 c_end = min(c + half_k + 1, frame.shape[1])
-                # Compute the median over the kernel region from the original frame
                 median_val = np.median(frame[r_start:r_end, c_start:c_end])
-                # Replace the pixels within the kernel region with the median value
                 new_block[i, r_start:r_end, c_start:c_end] = median_val
         return new_block
 
@@ -380,9 +368,8 @@ class SPARZIP:
                 print('Applying median patch...')
                 new_bp1 = []
                 for block in self.bp1:
-                    # Apply the median_patch function to each block; note that the result is still a dense dask array.
                     new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp1 = new_bp1  # Replace the original images with median-processed images
+                self.bp1 = new_bp1  
 
                 new_bp2 = []
                 for block in self.bp2:
@@ -390,8 +377,6 @@ class SPARZIP:
                 self.bp2 = new_bp2
             
             print('Done.')
-                
-
             # return sp1.map_blocks(sparse.COO, dtype='int16'), sp2.map_blocks(sparse.COO, dtype='int16')
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
         print('single plane')
@@ -412,9 +397,8 @@ class SPARZIP:
                 print('Applying median patch...')
                 new_bp1 = []
                 for block in self.bp1:
-                    # Apply the median_patch function to each block; note that the result is still a dense dask array.
                     new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp1 = new_bp1  # Replace the original images with median-processed images
+                self.bp1 = new_bp1
         print('Done.')
 
 
