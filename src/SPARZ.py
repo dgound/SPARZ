@@ -35,6 +35,7 @@ class SPARZIP:
                  stem:str, 
                  output_path:str,
                  path_image_files2:str = None,
+                 peaks_process:str = None,
                  relative_threshold:float = 0.45, 
                  epsilon:int = 12, 
                  kernel_size:int = 9, 
@@ -103,6 +104,7 @@ class SPARZIP:
         self.find_roi = find_peaks
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
+        self.peak_process = peaks_process
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -115,6 +117,10 @@ class SPARZIP:
                 self.bp2 = self.align_planes(self.bp1, self.bp2)
 
         self.processed_bp1,self.processed_bp2 = self.process_images()
+        
+        if self.peak_process not in [None, 'median']:
+            raise ValueError('Peaks process must be either None or median.')
+
 
     @delayed
     def load_dat_file(self,dat_file,dimX, dimY):
@@ -261,7 +267,6 @@ class SPARZIP:
 
         # Remove the padding from the new array
         return new_arr[pad_size:-pad_size, pad_size:-pad_size]
-    
 
     def align_planes(self,plane1:np.ndarray, plane2:np.ndarray):
         print('Aligning planes, please wait...')
@@ -320,7 +325,34 @@ class SPARZIP:
             return self.processed_bp1[index].blocks[start_frame:end_frame,0].compute().todense()
         else:
             return self.processed_bp2[index].blocks[start_frame:end_frame,0].compute().todense()
-        
+
+    def median_patch(self, block):
+        """
+        Given a NumPy array block of shape (n_frames, height, width),
+        this function processes each frame: for each detected peak (using self.find_peaks),
+        it defines a square kernel of size self.kernel_size centered on the peak,
+        computes the median of that kernel region, and replaces the pixels in that region
+        with that median value. Pixels outside any kernel remain unchanged.
+        """
+        # Make a copy of the block so that we do not modify the original data in place
+        new_block = np.copy(block)
+        for i in range(block.shape[0]):
+            frame = block[i]
+            # Detect peaks in the frame using your existing method
+            peaks = self.find_peaks(frame, self.kernel_size, min_distance=1)
+            for (r, c) in peaks:
+                half_k = self.kernel_size // 2
+                # Compute the kernel boundaries (clipping to image borders)
+                r_start = max(r - half_k, 0)
+                r_end = min(r + half_k + 1, frame.shape[0])
+                c_start = max(c - half_k, 0)
+                c_end = min(c + half_k + 1, frame.shape[1])
+                # Compute the median over the kernel region from the original frame
+                median_val = np.median(frame[r_start:r_end, c_start:c_end])
+                # Replace the pixels within the kernel region with the median value
+                new_block[i, r_start:r_end, c_start:c_end] = median_val
+        return new_block
+
     def process_images(self):
         print('Processing images...')
         # map1 = self.bp1.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16')
@@ -343,11 +375,26 @@ class SPARZIP:
                     return da.where(kernel, img, 0)
                 sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
                 sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
+
+            if self.peak_process == 'median':
+                print('Applying median patch...')
+                new_bp1 = []
+                for block in self.bp1:
+                    # Apply the median_patch function to each block; note that the result is still a dense dask array.
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1  # Replace the original images with median-processed images
+
+                new_bp2 = []
+                for block in self.bp2:
+                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp2 = new_bp2
             
             print('Done.')
+                
+
             # return sp1.map_blocks(sparse.COO, dtype='int16'), sp2.map_blocks(sparse.COO, dtype='int16')
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
-        
+        print('single plane')
         def add_mask(peaks:np.ndarray):
             tmp = np.zeros(self.bp1[0][0,:,:].shape)
             tmp[peaks[:, 0], peaks[:, 1]] = 1 
@@ -360,7 +407,17 @@ class SPARZIP:
             def apply_where(kernel, img):
                 return da.where(kernel, img, 0)
             sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+        finally:
+            if self.peak_process == 'median':
+                print('Applying median patch...')
+                new_bp1 = []
+                for block in self.bp1:
+                    # Apply the median_patch function to each block; note that the result is still a dense dask array.
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1  # Replace the original images with median-processed images
         print('Done.')
+
+
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
     
     # def compress_joblib(self,path,mat):
@@ -1218,8 +1275,8 @@ class SPARUNZIP:
 # bp2='/Users/dimos/raw_image_compression/nir_et_al/img_*_bp2.tiff'
 # %%
 
-# bp1='/Users/dimos/SPARZ_fig1/sequence-as-stack-MT0.N1.HD-BP-250.tif'
-# bp2='/Users/dimos/SPARZ_fig1/sequence-as-stack-MT0.N1.HD-BP+250.tif'
+# bp1='/Users/dimos/SPARZ_fig1/synth_data/sequence-as-stack-MT0.N1.HD-BP-250.tif'
+# bp2='/Users/dimos/SPARZ_fig1/synth_data/sequence-as-stack-MT0.N1.HD-BP+250.tif'
 
 # codec='prores'
 # extension='mov' if codec=='prores' else ('zst' if codec=='zstd' else ('avi' if codec=='ffv1' else 'mp4'))
@@ -1235,20 +1292,20 @@ class SPARUNZIP:
 
 # z=SPARZIP(path_image_files1=bp1,
 #            path_image_files2=bp2,
-#            output_path=out,
-#            stem='test',
-#            find_peaks=sparsze)
+#            output_path='.',
+#            stem='median',
+#            peaks_process='median')
 # #%%
-# # z.run(codec=codec,compute_zstd_dict=False,compression_level=0)
+# z.run(codec='x265',compute_zstd_dict=False,compression_level=0)
 # # %%
-# u=SPARUNZIP(path_sparse_bp1=sparse_bp1,
-#             path_encoded_bp1=f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*-250*.{extension}',
+# u=SPARUNZIP(path_sparse_bp1='/Users/dimos/Documents/GitHub/SPARZ/src/sequence-as-stack-MT0.N1.HD-BP-250.npz',
+#             path_encoded_bp1='/Users/dimos/Documents/GitHub/SPARZ/src/sequence-as-stack-MT0.N1.HD-BP-250_compression_level_0.mp4',
 #             stem='zstd_test',
-#             output_path=out,
-#             path_sparse_bp2=sparse_bp2,
-#             path_encoded_bp2=f'/Users/dimos/SPARZ_fig1/{ROI}/{codec}/data/*+250*.{extension}' if sparse else None,
-#             use_roi=sparsze)
-# # %%
+#             output_path='.',
+#             path_sparse_bp2='/Users/dimos/Documents/GitHub/SPARZ/src/sequence-as-stack-MT0.N1.HD-BP+250.npz',
+#             path_encoded_bp2='/Users/dimos/Documents/GitHub/SPARZ/src/sequence-as-stack-MT0.N1.HD-BP+250_compression_level_0.mp4',
+#             use_roi='True')
+# %%
 # u.run()
 
 # # # # %%
