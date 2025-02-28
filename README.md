@@ -7,6 +7,11 @@ Download the repo and navigate to inside the downloaded folder (there should be 
 
 ## Dependencies 
 
+Installation of ffmpeg: 
+
+- Windows: Download from webpage: https://ffmpeg.org/download.html  
+- MacOS: Homebrew -> 'brew install ffmpeg'
+- Linux: sudo apt install ffmpeg
 
 ## Usage
 Minimum working example
