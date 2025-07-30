@@ -5,7 +5,7 @@ from setuptools import setup
 
 setup(
     name='SPARZ',
-    version='0.1',
+    version='0.5',
     description='Compress Single Molecule Localization Microscopy Data',
     long_description='Compression of Single Molecule Localization Microscopy Data using Sparse matrices and h265 video compression',
     author='Dimos Gkountaroulis, Antonios Lioutas, Lian Jiang, and Laura Breimann',
