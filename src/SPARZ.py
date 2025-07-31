@@ -27,6 +27,7 @@ import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 import av
 import concurrent.futures
+import imageio
 # import joblib
 
 #%%
@@ -120,117 +121,7 @@ class SPARZIP:
         
         if self.peak_process not in [None, 'median']:
             raise ValueError('Peaks process must be either None or median.')
-        
-        self.tiff_metadata = self.extract_tiff_metadata()
 
-    def extract_tiff_metadata(self):
-        """Extract comprehensive TIFF metadata from input files"""
-        metadata_list = []
-        
-        if not self.path_image_files1:
-            return metadata_list
-            
-        for file_path in self.path_image_files1:
-            metadata = {}
-            ext = os.path.splitext(file_path)[1]
-            
-            if ext in ['.tiff', '.tif']:
-                try:
-                    with TiffFile(file_path) as tif:
-                        first_page = tif.pages[0]
-                        
-                        metadata['shape'] = first_page.shape
-                        metadata['dtype'] = str(first_page.dtype)
-                        metadata['is_multipage'] = len(tif.pages) > 1
-                        metadata['page_count'] = len(tif.pages)
-                        
-                        metadata['tags'] = {}
-                        for tag in first_page.tags:
-                            try:
-                                if hasattr(tag, 'name') and hasattr(tag, 'value'):
-                                    if isinstance(tag.value, (str, int, float, bool)):
-                                        metadata['tags'][tag.name] = tag.value
-                                    elif isinstance(tag.value, (tuple, list)) and len(tag.value) <= 10:
-                                        metadata['tags'][tag.name] = list(tag.value)
-                            except (AttributeError, ValueError, TypeError):
-                                continue
-                        
-                        if tif.is_imagej:
-                            try:
-                                metadata['imagej_metadata'] = tif.imagej_metadata
-                                metadata['is_imagej'] = True
-                            except:
-                                metadata['is_imagej'] = False
-                        else:
-                            metadata['is_imagej'] = False
-                            
-                        if hasattr(tif, 'shaped_metadata') and tif.shaped_metadata:
-                            try:
-                                metadata['shaped_metadata'] = tif.shaped_metadata
-                            except:
-                                pass
-                                
-                except Exception as e:
-                    print(f"Warning: Could not extract metadata from {file_path}: {e}")
-                    metadata = {'error': str(e), 'file_path': file_path}
-            else:
-                metadata = {'file_type': 'non_tiff', 'extension': ext}
-                
-            metadata_list.append(metadata)
-            
-        if not self.single_plane and self.path_image_files2:
-            bp2_metadata = []
-            for file_path in self.path_image_files2:
-                metadata = {}
-                ext = os.path.splitext(file_path)[1]
-                
-                if ext in ['.tiff', '.tif']:
-                    try:
-                        with TiffFile(file_path) as tif:
-                            first_page = tif.pages[0]
-                            
-                            metadata['shape'] = first_page.shape
-                            metadata['dtype'] = str(first_page.dtype)
-                            metadata['is_multipage'] = len(tif.pages) > 1
-                            metadata['page_count'] = len(tif.pages)
-                            
-                            metadata['tags'] = {}
-                            for tag in first_page.tags:
-                                try:
-                                    if hasattr(tag, 'name') and hasattr(tag, 'value'):
-                                        if isinstance(tag.value, (str, int, float, bool)):
-                                            metadata['tags'][tag.name] = tag.value
-                                        elif isinstance(tag.value, (tuple, list)) and len(tag.value) <= 10:
-                                            metadata['tags'][tag.name] = list(tag.value)
-                                except (AttributeError, ValueError, TypeError):
-                                    continue
-                            
-                            if tif.is_imagej:
-                                try:
-                                    metadata['imagej_metadata'] = tif.imagej_metadata
-                                    metadata['is_imagej'] = True
-                                except:
-                                    metadata['is_imagej'] = False
-                            else:
-                                metadata['is_imagej'] = False
-                                
-                            if hasattr(tif, 'shaped_metadata') and tif.shaped_metadata:
-                                try:
-                                    metadata['shaped_metadata'] = tif.shaped_metadata
-                                except:
-                                    pass
-                                    
-                    except Exception as e:
-                        print(f"Warning: Could not extract metadata from {file_path}: {e}")
-                        metadata = {'error': str(e), 'file_path': file_path}
-                else:
-                    metadata = {'file_type': 'non_tiff', 'extension': ext}
-                    
-                bp2_metadata.append(metadata)
-            
-            return {'bp1': metadata_list, 'bp2': bp2_metadata}
-        
-        return {'bp1': metadata_list, 'bp2': None}
 
     @delayed
     def load_dat_file(self,dat_file,dimX, dimY):
@@ -514,25 +405,6 @@ class SPARZIP:
 
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
     
-    def save_sparse_with_metadata(self, sparse_matrix, metadata, output_path):
-        """Save sparse matrix with embedded metadata"""
-        # Convert sparse matrix to COO format and compute if needed
-        if hasattr(sparse_matrix, 'compute'):
-            sparse_data = sparse_matrix.compute()
-        else:
-            sparse_data = sparse_matrix
-            
-        # Prepare data dictionary
-        data_to_save = {
-            'data': sparse_data.data,
-            'coords': sparse_data.coords,
-            'shape': sparse_data.shape,
-            'metadata': json.dumps(metadata, default=str)  # Serialize metadata as JSON string
-        }
-        
-        # Save using numpy's compressed format
-        np.savez_compressed(output_path, **data_to_save)
-    
     # def compress_joblib(self,path,mat):
         # joblib.dump(mat, path, compress=('lzma', 9))
 
@@ -549,17 +421,16 @@ class SPARZIP:
             # Prepare a list to store delayed operations
             saves = []
             for i in range(len(self.processed_bp1)):
-                # Directly append delayed save operations with metadata to the list
+                # Directly append delayed save_npz operations to the list
                 flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
-                bp1_metadata = self.tiff_metadata['bp1'][i] if i < len(self.tiff_metadata['bp1']) else {}
-                saves.append(delayed(self.save_sparse_with_metadata)(
-                    self.processed_bp1[i], bp1_metadata, self.output_path+flnm1+'.npz'))
-                
+                # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
+                saves.append(delayed(sparse.save_npz)(self.output_path+flnm1+'.npz',self.processed_bp1[i]))
+                # saves.append(delayed(self.compress_joblib)(self.output_path+flnm1+'.sparz',self.processed_bp1[i]))
                 if self.single_plane == False:
                     flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
-                    bp2_metadata = self.tiff_metadata['bp2'][i] if self.tiff_metadata['bp2'] and i < len(self.tiff_metadata['bp2']) else {}
-                    saves.append(delayed(self.save_sparse_with_metadata)(
-                        self.processed_bp2[i], bp2_metadata, self.output_path+flnm2+'.npz'))
+                    # saves.append(delayed(self.compress_joblib)(self.output_path+flnm2+'.sparz',self.processed_bp2[i]))
+                    # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
+                    saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
             # Perform the save_npz operations
             if show_progress_bar:
                 progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
@@ -1014,67 +885,20 @@ class SPARUNZIP:
     #         bp1.append(joblib.load(files_bp1[i]))
     #     return bp1, None
 
-    def load_sparse_with_metadata(self, file_path):
-        """Load sparse matrix and metadata from npz file"""
-        try:
-            data = np.load(file_path)
-            
-            # Check if this is the new format with embedded metadata
-            if 'metadata' in data.files:
-                # New format with metadata
-                coords = data['coords']
-                values = data['data']
-                shape = tuple(data['shape'])
-                metadata_str = str(data['metadata'])
-                metadata = json.loads(metadata_str)
-                
-                # Reconstruct sparse matrix
-                sparse_matrix = sparse.COO(coords, values, shape=shape)
-                return sparse_matrix, metadata
-            else:
-                # Old format without metadata - load using sparse.load_npz
-                sparse_matrix = sparse.load_npz(file_path)
-                return sparse_matrix, {}
-                
-        except Exception as e:
-            print(f"Warning: Could not load metadata from {file_path}: {e}")
-            # Fallback to old loading method
-            sparse_matrix = sparse.load_npz(file_path)
-            return sparse_matrix, {}
-
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
         files_bp1 = sorted(glob.glob(sparse_bp1))
-        bp1_metadata = []
-        bp2_metadata = []
-        
         if sparse_bp2 is not None:
             files_bp2 = sorted(glob.glob(sparse_bp2))
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp1,bp2 = [],[]
             for i in range(len(files_bp1)):
-                # Load sparse matrix and metadata
-                sparse_mat1, metadata1 = self.load_sparse_with_metadata(files_bp1[i])
-                sparse_mat2, metadata2 = self.load_sparse_with_metadata(files_bp2[i])
-                
-                bp1.append(da.from_array(sparse_mat1, chunks=(1,shapes[i][1],shapes[i][2])))
-                bp2.append(da.from_array(sparse_mat2, chunks=(1,shapes[i][1],shapes[i][2])))
-                bp1_metadata.append(metadata1)
-                bp2_metadata.append(metadata2)
-                
-            # Store metadata in instance variables
-            self.sparse_metadata = {'bp1': bp1_metadata, 'bp2': bp2_metadata}
+                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+                bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
             return bp1, bp2
-            
-        bp1 = []
+        bp1 =[]
         for i in range(len(files_bp1)):
-            # Load sparse matrix and metadata
-            sparse_mat1, metadata1 = self.load_sparse_with_metadata(files_bp1[i])
-            bp1.append(da.from_array(sparse_mat1, chunks=(1,shapes[i][1],shapes[i][2])))
-            bp1_metadata.append(metadata1)
-            
-        # Store metadata in instance variables
-        self.sparse_metadata = {'bp1': bp1_metadata, 'bp2': None}
+            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
         return bp1, None
 
 
@@ -1316,50 +1140,6 @@ class SPARUNZIP:
                 chunk = frames[i:i + self.chunk_size].compute()
                 f.write(chunk.tobytes())
 
-    def write_tiff_with_metadata(self, filename, frames, metadata=None, chunk_size=None):
-        """Write TIFF with preserved metadata"""
-        if chunk_size is None:
-            chunk_size = self.chunk_size
-            
-        write_kwargs = {'bigtiff': True}
-        
-        if metadata and 'tags' in metadata:
-            # Restore common TIFF tags
-            tags = metadata['tags']
-            
-            # Preserve resolution information
-            if 'XResolution' in tags:
-                write_kwargs['resolution'] = (tags['XResolution'], tags.get('YResolution', tags['XResolution']))
-            if 'ResolutionUnit' in tags:
-                write_kwargs['resolutionunit'] = tags['ResolutionUnit']
-                
-            # Preserve software and description
-            if 'Software' in tags:
-                write_kwargs['software'] = tags['Software']
-            if 'ImageDescription' in tags:
-                write_kwargs['description'] = tags['ImageDescription']
-                
-            # Preserve datetime
-            if 'DateTime' in tags:
-                write_kwargs['datetime'] = tags['DateTime']
-                
-        # Handle ImageJ metadata if present
-        if metadata and metadata.get('is_imagej', False):
-            write_kwargs['imagej'] = True
-            if 'imagej_metadata' in metadata:
-                # ImageJ metadata needs special handling
-                imagej_meta = metadata['imagej_metadata']
-                if isinstance(imagej_meta, dict):
-                    # Convert back to ImageJ format
-                    if 'frames' in imagej_meta:
-                        write_kwargs['metadata'] = {'frames': imagej_meta['frames']}
-        
-        num_frames = frames.shape[0]
-        with tifffile.TiffWriter(filename, **write_kwargs) as tif:
-            for i in range(0, num_frames, chunk_size):
-                chunk = frames[i:i+chunk_size].compute()
-                for frame in chunk:
-                    tif.write(frame, photometric='minisblack')
 
     def run(self):
         print('Inflating images...')
@@ -1383,12 +1163,10 @@ class SPARUNZIP:
                 # filename1 = f'{self.output_path}{self.stem}_bp1_part_{k}.tiff'
                 if self.output_format == 'tiff':
                     tiff_filename1 = f'{output_filename1}.tiff'
-                    # Get metadata for this file if available
-                    metadata1 = self.sparse_metadata['bp1'][k] if hasattr(self, 'sparse_metadata') and k < len(self.sparse_metadata['bp1']) else {}
-                    self.write_tiff_with_metadata(tiff_filename1, self.processed_bp1[k], metadata1)
+                    all_frames = self.processed_bp1[k].compute()
+                    imageio.mimwrite(tiff_filename1, all_frames, format='TIFF')
                     if show_progress_bar:
                         progress_bar1.update(num_frames)
-                    if show_progress_bar:
                         progress_bar1.close()
                 elif self.output_format == 'dat':
                     dat_filename1 = f'{output_filename1}.dat'
@@ -1406,12 +1184,10 @@ class SPARUNZIP:
                         tiff_filename2 = f'{output_filename2}.tiff'
                         if show_progress_bar:
                             progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
-                        # Get metadata for this file if available
-                        metadata2 = self.sparse_metadata['bp2'][k] if hasattr(self, 'sparse_metadata') and self.sparse_metadata['bp2'] and k < len(self.sparse_metadata['bp2']) else {}
-                        self.write_tiff_with_metadata(tiff_filename2, self.processed_bp2[k], metadata2)
+                        all_frames = self.processed_bp2[k].compute()
+                        imageio.mimwrite(tiff_filename2, all_frames, format='TIFF')
                         if show_progress_bar:
                             progress_bar2.update(num_frames)
-                        if show_progress_bar:
                             progress_bar2.close()
                     elif self.output_format == 'dat':
                         dat_filename2 = f'{output_filename2}.dat'
@@ -1439,11 +1215,10 @@ class SPARUNZIP:
 
                 if show_progress_bar:
                     progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
-                # No metadata available when not using ROI
-                self.write_tiff_with_metadata(filename1, self.encoded_bp1[k], {})
+                all_frames = self.encoded_bp1[k].compute()
+                imageio.mimwrite(filename1, all_frames, format='TIFF')
                 if show_progress_bar:
                     progress_bar.update(num_frames)
-                if show_progress_bar:
                     progress_bar.close()
                 if self.encoded_bp2 is not None:
                     # if type(self.path_encoded_bp2) == list:
@@ -1455,11 +1230,10 @@ class SPARUNZIP:
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     if show_progress_bar:
                         progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
-                    # No metadata available when not using ROI
-                    self.write_tiff_with_metadata(filename2, self.encoded_bp2[k], {})
+                    all_frames = self.encoded_bp2[k].compute()
+                    imageio.mimwrite(filename2, all_frames, format='TIFF')
                     if show_progress_bar:
                         progress_bar.update(num_frames)
-                    if show_progress_bar:
                         progress_bar.close()
                 gc.collect()
         print('Done.')
