@@ -27,8 +27,147 @@ import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 import av
 import concurrent.futures
-import imageio
+from typing import Any, Dict, List, Union
 # import joblib
+
+#%%
+def serialize_metadata_value(value: Any) -> Any:
+    """
+    Convert metadata values to JSON-serializable format with type checking.
+    
+    Args:
+        value: The metadata value to serialize
+        
+    Returns:
+        JSON-serializable version of the value or None if not serializable
+    """
+    # Handle None
+    if value is None:
+        return None
+    
+    # Handle basic JSON-serializable types
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    
+    # Handle numpy types
+    if isinstance(value, np.integer):
+        return int(value)
+    elif isinstance(value, np.floating):
+        return float(value)
+    elif isinstance(value, np.bool_):
+        return bool(value)
+    elif isinstance(value, np.ndarray):
+        # Convert small arrays to lists, skip large ones
+        if value.size <= 100:  # Arbitrary limit for reasonable metadata
+            return value.tolist()
+        else:
+            return f"<numpy_array_shape_{value.shape}_dtype_{value.dtype}>"
+    
+    # Handle lists and tuples
+    elif isinstance(value, (list, tuple)):
+        serialized_list = []
+        for item in value:
+            serialized_item = serialize_metadata_value(item)
+            if serialized_item is not None:
+                serialized_list.append(serialized_item)
+        return serialized_list
+    
+    # Handle dictionaries
+    elif isinstance(value, dict):
+        serialized_dict = {}
+        for k, v in value.items():
+            # Ensure key is string
+            key_str = str(k)
+            serialized_value = serialize_metadata_value(v)
+            if serialized_value is not None:
+                serialized_dict[key_str] = serialized_value
+        return serialized_dict
+    
+    # Handle bytes
+    elif isinstance(value, bytes):
+        try:
+            # Try to decode as UTF-8 string
+            return value.decode('utf-8')
+        except UnicodeDecodeError:
+            # If not UTF-8, represent as base64 or skip
+            return f"<bytes_length_{len(value)}>"
+    
+    # Handle other types by converting to string representation
+    else:
+        try:
+            str_value = str(value)
+            # Only keep reasonable length strings
+            if len(str_value) <= 10000:  # Arbitrary limit
+                return f"<{type(value).__name__}>: {str_value}"
+            else:
+                return f"<{type(value).__name__}_length_{len(str_value)}>"
+        except:
+            return f"<non_serializable_{type(value).__name__}>"
+
+def serialize_metadata(metadata_list: List[Dict]) -> List[Dict]:
+    """
+    Serialize a list of metadata dictionaries for JSON storage.
+    
+    Args:
+        metadata_list: List of metadata dictionaries from SPARZIP
+        
+    Returns:
+        List of JSON-serializable metadata dictionaries
+    """
+    serialized_list = []
+    
+    for i, metadata in enumerate(metadata_list):
+        if not isinstance(metadata, dict):
+            print(f"Warning: metadata[{i}] is not a dictionary, skipping")
+            continue
+            
+        serialized_metadata = {}
+        
+        for key, value in metadata.items():
+            # Ensure key is string
+            key_str = str(key)
+            
+            # Check and serialize the value
+            serialized_value = serialize_metadata_value(value)
+            
+            if serialized_value is not None:
+                serialized_metadata[key_str] = serialized_value
+            else:
+                print(f"Warning: Could not serialize metadata[{i}]['{key}'] of type {type(value)}")
+        
+        serialized_list.append(serialized_metadata)
+    
+    return serialized_list
+
+def restore_numeric_values(metadata: Dict) -> Dict:
+    """
+    Restore numeric values that may have been converted during JSON serialization.
+    Call this before using metadata in format_metadata_for_tifffile().
+    """
+    restored_metadata = {}
+    
+    for key, value in metadata.items():
+        if isinstance(value, dict):
+            # Recursively restore nested dictionaries
+            restored_metadata[key] = restore_numeric_values(value)
+        elif isinstance(value, list):
+            # Restore lists that might contain metadata
+            restored_list = []
+            for item in value:
+                if isinstance(item, dict):
+                    restored_list.append(restore_numeric_values(item))
+                else:
+                    restored_list.append(item)
+            restored_metadata[key] = restored_list
+        elif isinstance(value, str) and value.startswith('<') and value.endswith('>') and not value.startswith('<?xml'):
+            # Skip non-serializable placeholders, but preserve XML content (like OME-XML)
+            print(f'Skipping non-serializable metadata: {key} = {value}')
+            continue
+        else:
+            # Keep the value as-is
+            restored_metadata[key] = value
+    
+    return restored_metadata
 
 #%%
 class SPARZIP:
@@ -118,6 +257,9 @@ class SPARZIP:
                 self.bp2 = self.align_planes(self.bp1, self.bp2)
 
         self.processed_bp1,self.processed_bp2 = self.process_images()
+        
+        # Extract and store metadata from source files
+        self.metadata_bp1, self.metadata_bp2 = self.extract_metadata()
         
         if self.peak_process not in [None, 'median']:
             raise ValueError('Peaks process must be either None or median.')
@@ -404,6 +546,295 @@ class SPARZIP:
 
 
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
+
+    def extract_metadata(self):
+        """Extract comprehensive TIFF metadata including OME-XML from input files"""
+        print('Extracting metadata from source files...')
+        metadata_bp1 = []
+        
+        for file_path in self.path_image_files1:
+            metadata = {}
+            ext = os.path.splitext(file_path)[1].lower()
+            
+            if ext in ['.tiff', '.tif']:
+                try:
+                    with TiffFile(file_path) as tif:
+                        if tif.pages:
+                            first_page = tif.pages[0]
+                            # Basic image properties
+                            metadata['shape'] = first_page.shape
+                            metadata['dtype'] = str(first_page.dtype)
+                            metadata['is_multipage'] = len(tif.pages) > 1
+                            metadata['page_count'] = len(tif.pages)
+                            
+                            # Extract TIFF tags from first page (global metadata)
+                            metadata['tags'] = {}
+                            for tag in first_page.tags:
+                                try:
+                                    if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                        # Store commonly used tags
+                                        if tag.name in ['ImageDescription', 'Software', 'DateTime', 
+                                                       'XResolution', 'YResolution', 'ResolutionUnit']:
+                                            if isinstance(tag.value, (str, int, float, bool)):
+                                                metadata['tags'][tag.name] = tag.value
+                                            elif isinstance(tag.value, (tuple, list)):
+                                                metadata['tags'][tag.name] = list(tag.value)
+                                except (AttributeError, ValueError, TypeError):
+                                    continue
+                            
+                            # Extract individual IFD metadata from each page
+                            metadata['individual_ifds'] = []
+                            for page_idx, page in enumerate(tif.pages):
+                                ifd_metadata = {'page_index': page_idx}
+                                
+                                # Extract all tags from this IFD
+                                ifd_tags = {}
+                                for tag in page.tags:
+                                    try:
+                                        if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                            # Store all tags for individual IFDs
+                                            if isinstance(tag.value, (str, int, float, bool)):
+                                                ifd_tags[tag.name] = tag.value
+                                            elif isinstance(tag.value, (tuple, list)) and len(tag.value) <= 10:
+                                                ifd_tags[tag.name] = list(tag.value)
+                                            # Also store by tag number for custom tags
+                                            if hasattr(tag, 'code'):
+                                                ifd_tags[f'tag_{tag.code}'] = tag.value
+                                    except (AttributeError, ValueError, TypeError):
+                                        continue
+                                
+                                ifd_metadata['tags'] = ifd_tags
+                                metadata['individual_ifds'].append(ifd_metadata)
+                            
+                            # ImageJ metadata
+                            if tif.is_imagej:
+                                try:
+                                    metadata['imagej_metadata'] = tif.imagej_metadata
+                                    metadata['is_imagej'] = True
+                                except:
+                                    metadata['is_imagej'] = False
+                            else:
+                                metadata['is_imagej'] = False
+                            
+                            # OME-XML metadata (for OME-TIFF files)
+                            # Check multiple sources for OME-XML
+                            metadata['is_ome'] = False
+                            if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
+                                metadata['ome_xml'] = tif.ome_metadata
+                                metadata['is_ome'] = True
+                            elif 'ImageDescription' in metadata['tags']:
+                                # Check if ImageDescription contains OME-XML
+                                desc = metadata['tags']['ImageDescription']
+                                if isinstance(desc, str) and ('<?xml' in desc or '<OME' in desc):
+                                    metadata['ome_xml'] = desc
+                                    metadata['is_ome'] = True
+                            
+                            # Also check if this is an OME-TIFF file
+                            if hasattr(tif, 'is_ome') and tif.is_ome:
+                                metadata['is_ome'] = True
+                                if not metadata.get('ome_xml') and hasattr(tif, 'ome_metadata'):
+                                    metadata['ome_xml'] = tif.ome_metadata
+                            
+                            # Shaped metadata (includes additional structured metadata)
+                            if hasattr(tif, 'shaped_metadata') and tif.shaped_metadata:
+                                try:
+                                    metadata['shaped_metadata'] = tif.shaped_metadata
+                                except:
+                                    pass
+                                    
+                except Exception as e:
+                    print(f"Warning: Could not extract metadata from {file_path}: {e}")
+                    metadata = {'error': str(e)}
+            else:
+                metadata = {'file_type': 'non_tiff'}
+                
+            metadata_bp1.append(metadata)
+        
+        # Extract metadata for bp2 if it exists
+        metadata_bp2 = []
+        if not self.single_plane:
+            for file_path in self.path_image_files2:
+                metadata = {}
+                ext = os.path.splitext(file_path)[1].lower()
+                
+                if ext in ['.tiff', '.tif']:
+                    try:
+                        with TiffFile(file_path) as tif:
+                            if tif.pages:
+                                first_page = tif.pages[0]
+                                metadata['shape'] = first_page.shape
+                                metadata['dtype'] = str(first_page.dtype)
+                                metadata['is_multipage'] = len(tif.pages) > 1
+                                metadata['page_count'] = len(tif.pages)
+                                
+                                # Extract TIFF tags from first page (global metadata)
+                                metadata['tags'] = {}
+                                for tag in first_page.tags:
+                                    try:
+                                        if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                            if tag.name in ['ImageDescription', 'Software', 'DateTime', 
+                                                           'XResolution', 'YResolution', 'ResolutionUnit']:
+                                                if isinstance(tag.value, (str, int, float, bool)):
+                                                    metadata['tags'][tag.name] = tag.value
+                                                elif isinstance(tag.value, (tuple, list)):
+                                                    metadata['tags'][tag.name] = list(tag.value)
+                                    except (AttributeError, ValueError, TypeError):
+                                        continue
+                                
+                                # Extract individual IFD metadata from each page
+                                metadata['individual_ifds'] = []
+                                for page_idx, page in enumerate(tif.pages):
+                                    ifd_metadata = {'page_index': page_idx}
+                                    
+                                    # Extract all tags from this IFD
+                                    ifd_tags = {}
+                                    for tag in page.tags:
+                                        try:
+                                            if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                                # Store all tags for individual IFDs
+                                                if isinstance(tag.value, (str, int, float, bool)):
+                                                    ifd_tags[tag.name] = tag.value
+                                                elif isinstance(tag.value, (tuple, list)) and len(tag.value) <= 10:
+                                                    ifd_tags[tag.name] = list(tag.value)
+                                                # Also store by tag number for custom tags
+                                                if hasattr(tag, 'code'):
+                                                    ifd_tags[f'tag_{tag.code}'] = tag.value
+                                        except (AttributeError, ValueError, TypeError):
+                                            continue
+                                    
+                                    ifd_metadata['tags'] = ifd_tags
+                                    metadata['individual_ifds'].append(ifd_metadata)
+                                
+                                # ImageJ metadata
+                                if tif.is_imagej:
+                                    try:
+                                        metadata['imagej_metadata'] = tif.imagej_metadata
+                                        metadata['is_imagej'] = True
+                                    except:
+                                        metadata['is_imagej'] = False
+                                else:
+                                    metadata['is_imagej'] = False
+                                
+                                # OME-XML metadata (for OME-TIFF files)
+                                # Check multiple sources for OME-XML
+                                metadata['is_ome'] = False
+                                if hasattr(tif, 'ome_metadata') and tif.ome_metadata:
+                                    metadata['ome_xml'] = tif.ome_metadata
+                                    metadata['is_ome'] = True
+                                elif 'ImageDescription' in metadata['tags']:
+                                    # Check if ImageDescription contains OME-XML
+                                    desc = metadata['tags']['ImageDescription']
+                                    if isinstance(desc, str) and ('<?xml' in desc or '<OME' in desc):
+                                        metadata['ome_xml'] = desc
+                                        metadata['is_ome'] = True
+                                
+                                # Also check if this is an OME-TIFF file
+                                if hasattr(tif, 'is_ome') and tif.is_ome:
+                                    metadata['is_ome'] = True
+                                    if not metadata.get('ome_xml') and hasattr(tif, 'ome_metadata'):
+                                        metadata['ome_xml'] = tif.ome_metadata
+                                
+                                # Shaped metadata
+                                if hasattr(tif, 'shaped_metadata') and tif.shaped_metadata:
+                                    try:
+                                        metadata['shaped_metadata'] = tif.shaped_metadata
+                                    except:
+                                        pass
+                                        
+                    except Exception as e:
+                        print(f"Warning: Could not extract metadata from {file_path}: {e}")
+                        metadata = {'error': str(e)}
+                else:
+                    metadata = {'file_type': 'non_tiff'}
+                    
+                metadata_bp2.append(metadata)
+        
+        return metadata_bp1, metadata_bp2 if not self.single_plane else None
+
+    def format_metadata_for_tifffile(self, metadata, frame_index=None):
+        """Format extracted metadata for tifffile.TiffWriter"""
+        if not metadata or 'error' in metadata:
+            return None, []
+        
+        description = None
+        extratags = []
+        
+        # For the first frame, use global metadata
+        if frame_index is None or frame_index == 0:
+            # Add OME-XML if present (takes precedence)
+            if metadata.get('is_ome') and 'ome_xml' in metadata:
+                description = metadata['ome_xml']
+                # Add software tag (TIFF tag 305)
+                extratags.append((305, 's', 0, "SPARZIP with OME-XML", True))
+                return description, extratags
+            
+            # Add ImageJ metadata if present
+            description_parts = []
+            if metadata.get('is_imagej') and 'imagej_metadata' in metadata:
+                try:
+                    imagej_meta = metadata['imagej_metadata']
+                    if isinstance(imagej_meta, dict):
+                        for key, value in imagej_meta.items():
+                            if isinstance(value, (str, int, float)):
+                                description_parts.append(f"{key}={value}")
+                except:
+                    pass
+            
+            # Add TIFF tags to description and extratags
+            if 'tags' in metadata:
+                tags = metadata['tags']
+                
+                # ImageDescription is the most important
+                if 'ImageDescription' in tags:
+                    existing_desc = tags['ImageDescription']
+                    if existing_desc and isinstance(existing_desc, str):
+                        description = existing_desc
+                        if description_parts:
+                            description += f" | {' | '.join(description_parts)}"
+                
+                # Add other important tags as extratags
+                for tag_name, tag_value in tags.items():
+                    if tag_name == 'Software' and isinstance(tag_value, str):
+                        extratags.append((305, 's', 0, tag_value, True))  # Software tag
+                    elif tag_name == 'DateTime' and isinstance(tag_value, str):
+                        extratags.append((306, 's', 0, tag_value, True))  # DateTime tag
+                    elif tag_name not in ['ImageDescription', 'Software', 'DateTime'] and isinstance(tag_value, (str, int, float)):
+                        description_parts.append(f"{tag_name}={tag_value}")
+            
+            # Create description from parts if not already set
+            if description is None and description_parts:
+                description = ' | '.join(description_parts)
+            
+            # Add default software tag if not present
+            if not any(tag[0] == 305 for tag in extratags):
+                extratags.append((305, 's', 0, "SPARZIP", True))
+        
+        else:
+            # For subsequent frames, use individual IFD metadata if available
+            if 'individual_ifds' in metadata and frame_index < len(metadata['individual_ifds']):
+                ifd_meta = metadata['individual_ifds'][frame_index]
+                ifd_tags = ifd_meta.get('tags', {})
+                
+                # Add IFD-specific ImageDescription
+                if 'ImageDescription' in ifd_tags:
+                    description = ifd_tags['ImageDescription']
+                
+                # Add IFD-specific custom tags
+                for tag_name, tag_value in ifd_tags.items():
+                    if tag_name.startswith('tag_') and isinstance(tag_value, (str, int, float)):
+                        try:
+                            tag_code = int(tag_name.split('_')[1])
+                            if tag_code > 50000:  # Custom tags usually > 50000
+                                if isinstance(tag_value, str):
+                                    extratags.append((tag_code, 's', 0, str(tag_value), True))
+                                elif isinstance(tag_value, int):
+                                    extratags.append((tag_code, 'i', 1, tag_value, True))
+                                elif isinstance(tag_value, float):
+                                    extratags.append((tag_code, 'f', 1, tag_value, True))
+                        except (ValueError, IndexError):
+                            continue
+        
+        return description, extratags
     
     # def compress_joblib(self,path,mat):
         # joblib.dump(mat, path, compress=('lzma', 9))
@@ -442,6 +873,10 @@ class SPARZIP:
                     progress_bar.update(self.batch_size)
             if show_progress_bar:
                 progress_bar.close()
+        
+        # Save metadata for lossless restoration
+        self.save_metadata()
+        
         end = time.time()
         
 
@@ -654,6 +1089,9 @@ class SPARZIP:
                 compute(*writes, scheduler='threads',num_workers=self.num_workers)
         else:
             compute(*writes, scheduler='threads',num_workers=self.num_workers)
+        
+        # Save metadata for lossless restoration
+        self.save_metadata()
 
     def write_frames_to_video(self, bp1_block, video_name, writer_args):
         # Convert Dask array slices to NumPy arrays
@@ -788,6 +1226,41 @@ class SPARZIP:
             except Exception as e:
                 print(f"Error during compression: {e}")
 
+    def save_metadata(self):
+        """
+        Save extracted metadata to JSON files for later restoration.
+        """
+        print('Saving metadata for lossless restoration...')
+        
+        # Save BP1 metadata
+        if hasattr(self, 'metadata_bp1') and self.metadata_bp1:
+            metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
+            
+            try:
+                serialized_metadata_bp1 = serialize_metadata(self.metadata_bp1)
+                
+                with open(metadata_file_bp1, 'w') as f:
+                    json.dump(serialized_metadata_bp1, f, indent=2, ensure_ascii=False)
+                
+                print(f'Saved BP1 metadata to {metadata_file_bp1}')
+                
+            except Exception as e:
+                print(f'Error saving BP1 metadata: {e}')
+        
+        # Save BP2 metadata if it exists
+        if hasattr(self, 'metadata_bp2') and self.metadata_bp2:
+            metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+            
+            try:
+                serialized_metadata_bp2 = serialize_metadata(self.metadata_bp2)
+                
+                with open(metadata_file_bp2, 'w') as f:
+                    json.dump(serialized_metadata_bp2, f, indent=2, ensure_ascii=False)
+                
+                print(f'Saved BP2 metadata to {metadata_file_bp2}')
+                
+            except Exception as e:
+                print(f'Error saving BP2 metadata: {e}')
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if codec!='zstd' and compute_zstd_dict:
@@ -864,6 +1337,229 @@ class SPARUNZIP:
         else:
             self.output_path = output_path
         self.chunk_size = chunk_size
+        
+        # Extract metadata from encoded files for preservation
+        self.metadata_bp1, self.metadata_bp2 = self.load_original_metadata()
+        
+        # Restore numeric values
+        if self.metadata_bp1:
+            self.metadata_bp1 = [restore_numeric_values(meta) for meta in self.metadata_bp1]
+        if self.metadata_bp2:
+            self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
+
+    def load_original_metadata(self):
+        """
+        Load original TIFF metadata from JSON files saved during compression.
+        """
+        print('Loading original metadata for lossless restoration...')
+        
+        # Try to load BP1 metadata
+        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
+        print(f'DEBUG: Looking for metadata file: {metadata_file_bp1}')
+        print(f'DEBUG: output_path = "{self.output_path}"')
+        print(f'DEBUG: stem = "{self.stem}"')
+        print(f'DEBUG: File exists? {os.path.exists(metadata_file_bp1)}')
+        
+        metadata_bp1 = []
+        
+        if os.path.exists(metadata_file_bp1):
+            try:
+                with open(metadata_file_bp1, 'r') as f:
+                    metadata_bp1 = json.load(f)
+                print(f'✅ Loaded original BP1 metadata from {metadata_file_bp1}')
+                print(f'DEBUG: Loaded {len(metadata_bp1)} metadata entries')
+            except Exception as e:
+                print(f'Error loading BP1 metadata: {e}')
+                # Fallback to encoded metadata
+                metadata_bp1, _ = self.extract_encoded_metadata()
+        else:
+            print('❌ No original BP1 metadata found, using encoded file metadata')
+            print(f'DEBUG: Expected file: {metadata_file_bp1}')
+            
+            # Let's also check if metadata exists with different naming patterns
+            base_dir = os.path.dirname(metadata_file_bp1) if os.path.dirname(metadata_file_bp1) else self.output_path
+            if os.path.exists(base_dir):
+                try:
+                    all_files = os.listdir(base_dir)
+                    json_files = [f for f in all_files if f.endswith('_metadata_bp1.json')]
+                    if json_files:
+                        print(f'DEBUG: Found these metadata files in directory: {json_files}')
+                        print(f'DEBUG: You might need to use a different stem parameter')
+                    else:
+                        print(f'DEBUG: No *_metadata_bp1.json files found in {base_dir}')
+                except Exception as e:
+                    print(f'DEBUG: Error listing directory: {e}')
+            
+            metadata_bp1, _ = self.extract_encoded_metadata()
+        
+        # Try to load BP2 metadata
+        metadata_bp2 = None
+        if self.path_encoded_bp2:  # Only if BP2 exists
+            metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+            
+            if os.path.exists(metadata_file_bp2):
+                try:
+                    with open(metadata_file_bp2, 'r') as f:
+                        metadata_bp2 = json.load(f)
+                    print(f'✅ Loaded original BP2 metadata from {metadata_file_bp2}')
+                except Exception as e:
+                    print(f'Error loading BP2 metadata: {e}')
+                    # Fallback to encoded metadata
+                    _, metadata_bp2 = self.extract_encoded_metadata()
+            else:
+                print('No original BP2 metadata found, using encoded file metadata')
+                _, metadata_bp2 = self.extract_encoded_metadata()
+        
+        return metadata_bp1, metadata_bp2
+
+    def extract_encoded_metadata(self):
+        """Extract metadata from encoded video files if possible, or create basic metadata"""
+        print('Extracting metadata from encoded files...')
+        metadata_bp1 = []
+        
+        # For encoded files, we can't extract original TIFF metadata
+        # But we can create basic metadata structure
+        for file_path in self.path_encoded_bp1:
+            metadata = {
+                'source_file': os.path.basename(file_path),
+                'is_encoded': True,
+                'file_type': 'encoded_video'
+            }
+            metadata_bp1.append(metadata)
+        
+        metadata_bp2 = []
+        if self.path_encoded_bp2:
+            for file_path in self.path_encoded_bp2:
+                metadata = {
+                    'source_file': os.path.basename(file_path),
+                    'is_encoded': True,
+                    'file_type': 'encoded_video'
+                }
+                metadata_bp2.append(metadata)
+        
+        return metadata_bp1, metadata_bp2 if self.path_encoded_bp2 else None
+
+    def format_metadata_for_tifffile(self, metadata, frame_index=None):
+        """Format extracted metadata for tifffile.TiffWriter - SPARUNZIP version"""
+        if not metadata or 'error' in metadata:
+            return None, []
+        
+        description = None
+        extratags = []
+        
+        # For the first frame or encoded files, use global metadata
+        if frame_index is None or frame_index == 0 or metadata.get('is_encoded'):
+            # First priority: OME-XML from original metadata (even if marked as encoded)
+            if metadata.get('is_ome') and 'ome_xml' in metadata:
+                description = metadata['ome_xml']
+                extratags.append((305, 's', 0, "SPARUNZIP with OME-XML", True))
+                return description, extratags
+            
+            # Second priority: For encoded files without OME-XML, add basic info
+            if metadata.get('is_encoded'):
+                description = f"Reconstructed from {metadata['source_file']} | Processed by SPARUNZIP"
+                extratags.append((305, 's', 0, "SPARUNZIP", True))
+            else:
+                # Same logic as SPARZIP for original TIFF files
+                description_parts = []
+                
+                # Add ImageJ metadata if present
+                if metadata.get('is_imagej') and 'imagej_metadata' in metadata:
+                    try:
+                        imagej_meta = metadata['imagej_metadata']
+                        if isinstance(imagej_meta, dict):
+                            for key, value in imagej_meta.items():
+                                if isinstance(value, (str, int, float)):
+                                    description_parts.append(f"{key}={value}")
+                    except:
+                        pass
+                
+                # Add TIFF tags to description and extratags
+                if 'tags' in metadata:
+                    tags = metadata['tags']
+                    
+                    # ImageDescription is the most important
+                    if 'ImageDescription' in tags:
+                        existing_desc = tags['ImageDescription']
+                        if existing_desc and isinstance(existing_desc, str):
+                            description = existing_desc
+                            if description_parts:
+                                description += f" | {' | '.join(description_parts)}"
+                    
+                    # Add other important tags as extratags
+                    for tag_name, tag_value in tags.items():
+                        if tag_name == 'Software' and isinstance(tag_value, str):
+                            extratags.append((305, 's', 0, f"{tag_value} -> SPARUNZIP", True))  # Software tag
+                        elif tag_name == 'DateTime' and isinstance(tag_value, str):
+                            extratags.append((306, 's', 0, tag_value, True))  # DateTime tag
+                        elif tag_name not in ['ImageDescription', 'Software', 'DateTime'] and isinstance(tag_value, (str, int, float)):
+                            description_parts.append(f"{tag_name}={tag_value}")
+                
+                # Create description from parts if not already set
+                if description is None and description_parts:
+                    description = ' | '.join(description_parts)
+                
+                # Add default software tag if not present
+                if not any(tag[0] == 305 for tag in extratags):
+                    extratags.append((305, 's', 0, "SPARUNZIP", True))
+        
+        else:
+            # For subsequent frames, use individual IFD metadata if available
+            if 'individual_ifds' in metadata and frame_index < len(metadata['individual_ifds']):
+                ifd_meta = metadata['individual_ifds'][frame_index]
+                ifd_tags = ifd_meta.get('tags', {})
+                
+                # Add IFD-specific ImageDescription
+                if 'ImageDescription' in ifd_tags:
+                    description = ifd_tags['ImageDescription']
+                
+                # Add IFD-specific custom tags
+                for tag_name, tag_value in ifd_tags.items():
+                    if tag_name.startswith('tag_') and isinstance(tag_value, (str, int, float)):
+                        try:
+                            tag_code = int(tag_name.split('_')[1])
+                            if tag_code > 50000:  # Custom tags usually > 50000
+                                if isinstance(tag_value, str):
+                                    extratags.append((tag_code, 's', 0, str(tag_value), True))
+                                elif isinstance(tag_value, int):
+                                    extratags.append((tag_code, 'i', 1, tag_value, True))
+                                elif isinstance(tag_value, float):
+                                    extratags.append((tag_code, 'f', 1, tag_value, True))
+                        except (ValueError, IndexError):
+                            continue
+        
+        return description, extratags
+
+    def extract_resolution_from_metadata(self, metadata):
+        """Extract resolution information from metadata for tifffile.imwrite"""
+        resolution = None
+        resolution_unit = None
+        
+        if metadata and 'tags' in metadata:
+            tags = metadata['tags']
+            
+            # Get X and Y resolution
+            x_res = tags.get('XResolution')
+            y_res = tags.get('YResolution')
+            res_unit = tags.get('ResolutionUnit', 1)  # Default to no unit
+            
+            if x_res and y_res:
+                # Handle both tuple/list format [numerator, denominator] and direct values
+                if isinstance(x_res, (list, tuple)) and len(x_res) >= 2:
+                    x_resolution = x_res[0] / x_res[1] if x_res[1] != 0 else x_res[0]
+                else:
+                    x_resolution = float(x_res)
+                
+                if isinstance(y_res, (list, tuple)) and len(y_res) >= 2:
+                    y_resolution = y_res[0] / y_res[1] if y_res[1] != 0 else y_res[0]
+                else:
+                    y_resolution = float(y_res)
+                
+                resolution = (x_resolution, y_resolution)
+                # tifffile expects numeric values for resolutionunit, not strings
+                resolution_unit = {1: 1, 2: 2, 3: 3}.get(res_unit, 1)
+        
+        return resolution, resolution_unit
 
     # def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
     #     print ('Loading sparse matrices...')
@@ -1164,7 +1860,49 @@ class SPARUNZIP:
                 if self.output_format == 'tiff':
                     tiff_filename1 = f'{output_filename1}.tiff'
                     all_frames = self.processed_bp1[k].compute()
-                    imageio.mimwrite(tiff_filename1, all_frames, format='TIFF')
+                    # Get metadata for this file
+                    file_metadata = self.metadata_bp1[k] if k < len(self.metadata_bp1) else {}
+                    
+                    # DEBUG: Print metadata debugging info
+                    print(f"🔬 DEBUG metadata_bp1 length: {len(self.metadata_bp1) if self.metadata_bp1 else 0}")
+                    print(f"🔬 DEBUG k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
+                    print(f"🔬 DEBUG is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
+                    print(f"🔬 DEBUG has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
+                    
+                    # Use imwrite instead of TiffWriter for OME-XML compatibility
+                    ome_condition = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
+                    print(f"🔬 DEBUG OME condition: {ome_condition}")
+                    
+                    # Extract resolution information
+                    resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+                    
+                    if ome_condition:
+                        # For OME-TIFF files, use the original OME-XML
+                        original_ome_xml = file_metadata['ome_xml']
+                        print(f"🔬 DEBUG Taking OME-XML path, description length: {len(original_ome_xml)}")
+                        if resolution:
+                            print(f"🔬 DEBUG Adding resolution: {resolution} {resolution_unit}")
+                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=original_ome_xml, 
+                                           resolution=resolution, resolutionunit=resolution_unit)
+                        else:
+                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=original_ome_xml)
+                        print(f"🔬 DEBUG OME-XML written to: {tiff_filename1}")
+                    else:
+                        # For non-OME files, use standard metadata
+                        print(f"🔬 DEBUG Taking fallback path - using format_metadata_for_tifffile")
+                        description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+                        print(f"🔬 DEBUG Fallback description: {description[:100]}...")
+                        if resolution:
+                            print(f"🔬 DEBUG Adding resolution: {resolution} {resolution_unit}")
+                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=description, extratags=extratags,
+                                           resolution=resolution, resolutionunit=resolution_unit)
+                        else:
+                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=description, extratags=extratags)
+                        print(f"🔬 DEBUG Fallback written to: {tiff_filename1}")
                     if show_progress_bar:
                         progress_bar1.update(num_frames)
                         progress_bar1.close()
@@ -1185,7 +1923,49 @@ class SPARUNZIP:
                         if show_progress_bar:
                             progress_bar2 = tqdm(total=len(self.processed_bp2), desc="Extracting frames from plane 2", position=0, leave=True)
                         all_frames = self.processed_bp2[k].compute()
-                        imageio.mimwrite(tiff_filename2, all_frames, format='TIFF')
+                        # Get metadata for this file
+                        file_metadata = self.metadata_bp2[k] if self.metadata_bp2 and k < len(self.metadata_bp2) else {}
+                        
+                        # DEBUG: Print metadata debugging info for BP2
+                        print(f"🔬 DEBUG BP2 metadata_bp2 length: {len(self.metadata_bp2) if self.metadata_bp2 else 0}")
+                        print(f"🔬 DEBUG BP2 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
+                        print(f"🔬 DEBUG BP2 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
+                        print(f"🔬 DEBUG BP2 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
+                        
+                        # Use imwrite instead of TiffWriter for OME-XML compatibility
+                        ome_condition_bp2 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
+                        print(f"🔬 DEBUG BP2 OME condition: {ome_condition_bp2}")
+                        
+                        # Extract resolution information
+                        resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+                        
+                        if ome_condition_bp2:
+                            # For OME-TIFF files, use the original OME-XML
+                            original_ome_xml = file_metadata['ome_xml']
+                            print(f"🔬 DEBUG BP2 Taking OME-XML path, description length: {len(original_ome_xml)}")
+                            if resolution:
+                                print(f"🔬 DEBUG BP2 Adding resolution: {resolution} {resolution_unit}")
+                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
+                                               bigtiff=True, description=original_ome_xml,
+                                               resolution=resolution, resolutionunit=resolution_unit)
+                            else:
+                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
+                                               bigtiff=True, description=original_ome_xml)
+                            print(f"🔬 DEBUG BP2 OME-XML written to: {tiff_filename2}")
+                        else:
+                            # For non-OME files, use standard metadata
+                            print(f"🔬 DEBUG BP2 Taking fallback path - using format_metadata_for_tifffile")
+                            description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+                            print(f"🔬 DEBUG BP2 Fallback description: {description[:100]}...")
+                            if resolution:
+                                print(f"🔬 DEBUG BP2 Adding resolution: {resolution} {resolution_unit}")
+                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
+                                               bigtiff=True, description=description, extratags=extratags,
+                                               resolution=resolution, resolutionunit=resolution_unit)
+                            else:
+                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
+                                               bigtiff=True, description=description, extratags=extratags)
+                            print(f"🔬 DEBUG BP2 Fallback written to: {tiff_filename2}")
                         if show_progress_bar:
                             progress_bar2.update(num_frames)
                             progress_bar2.close()
@@ -1216,7 +1996,49 @@ class SPARUNZIP:
                 if show_progress_bar:
                     progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 1", position=0, leave=True)
                 all_frames = self.encoded_bp1[k].compute()
-                imageio.mimwrite(filename1, all_frames, format='TIFF')
+                # Get metadata for this file
+                file_metadata = self.metadata_bp1[k] if k < len(self.metadata_bp1) else {}
+                
+                # DEBUG: Print metadata debugging info for ENCODED BP1
+                print(f"🔬 DEBUG ENCODED BP1 metadata_bp1 length: {len(self.metadata_bp1) if self.metadata_bp1 else 0}")
+                print(f"🔬 DEBUG ENCODED BP1 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
+                print(f"🔬 DEBUG ENCODED BP1 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
+                print(f"🔬 DEBUG ENCODED BP1 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
+                
+                # Use imwrite instead of TiffWriter for OME-XML compatibility
+                ome_condition_enc_bp1 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
+                print(f"🔬 DEBUG ENCODED BP1 OME condition: {ome_condition_enc_bp1}")
+                
+                # Extract resolution information
+                resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+                
+                if ome_condition_enc_bp1:
+                    # For OME-TIFF files, use the original OME-XML
+                    original_ome_xml = file_metadata['ome_xml']
+                    print(f"🔬 DEBUG ENCODED BP1 Taking OME-XML path, description length: {len(original_ome_xml)}")
+                    if resolution:
+                        print(f"🔬 DEBUG ENCODED BP1 Adding resolution: {resolution} {resolution_unit}")
+                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
+                                       bigtiff=True, description=original_ome_xml,
+                                       resolution=resolution, resolutionunit=resolution_unit)
+                    else:
+                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
+                                       bigtiff=True, description=original_ome_xml)
+                    print(f"🔬 DEBUG ENCODED BP1 OME-XML written to: {filename1}")
+                else:
+                    # For non-OME files, use standard metadata
+                    print(f"🔬 DEBUG ENCODED BP1 Taking fallback path - using format_metadata_for_tifffile")
+                    description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+                    print(f"🔬 DEBUG ENCODED BP1 Fallback description: {description[:100]}...")
+                    if resolution:
+                        print(f"🔬 DEBUG ENCODED BP1 Adding resolution: {resolution} {resolution_unit}")
+                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
+                                       bigtiff=True, description=description, extratags=extratags,
+                                       resolution=resolution, resolutionunit=resolution_unit)
+                    else:
+                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
+                                       bigtiff=True, description=description, extratags=extratags)
+                    print(f"🔬 DEBUG ENCODED BP1 Fallback written to: {filename1}")
                 if show_progress_bar:
                     progress_bar.update(num_frames)
                     progress_bar.close()
@@ -1231,7 +2053,49 @@ class SPARUNZIP:
                     if show_progress_bar:
                         progress_bar = tqdm(total=len(self.encoded_bp1), desc="Extracting frames from plane 2", position=0, leave=True)
                     all_frames = self.encoded_bp2[k].compute()
-                    imageio.mimwrite(filename2, all_frames, format='TIFF')
+                    # Get metadata for this file
+                    file_metadata = self.metadata_bp2[k] if self.metadata_bp2 and k < len(self.metadata_bp2) else {}
+                    
+                    # DEBUG: Print metadata debugging info for ENCODED BP2
+                    print(f"🔬 DEBUG ENCODED BP2 metadata_bp2 length: {len(self.metadata_bp2) if self.metadata_bp2 else 0}")
+                    print(f"🔬 DEBUG ENCODED BP2 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
+                    print(f"🔬 DEBUG ENCODED BP2 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
+                    print(f"🔬 DEBUG ENCODED BP2 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
+                    
+                    # Use imwrite instead of TiffWriter for OME-XML compatibility
+                    ome_condition_enc_bp2 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
+                    print(f"🔬 DEBUG ENCODED BP2 OME condition: {ome_condition_enc_bp2}")
+                    
+                    # Extract resolution information
+                    resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+                    
+                    if ome_condition_enc_bp2:
+                        # For OME-TIFF files, use the original OME-XML
+                        original_ome_xml = file_metadata['ome_xml']
+                        print(f"🔬 DEBUG ENCODED BP2 Taking OME-XML path, description length: {len(original_ome_xml)}")
+                        if resolution:
+                            print(f"🔬 DEBUG ENCODED BP2 Adding resolution: {resolution} {resolution_unit}")
+                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=original_ome_xml,
+                                           resolution=resolution, resolutionunit=resolution_unit)
+                        else:
+                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=original_ome_xml)
+                        print(f"🔬 DEBUG ENCODED BP2 OME-XML written to: {filename2}")
+                    else:
+                        # For non-OME files, use standard metadata
+                        print(f"🔬 DEBUG ENCODED BP2 Taking fallback path - using format_metadata_for_tifffile")
+                        description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+                        print(f"🔬 DEBUG ENCODED BP2 Fallback description: {description[:100]}...")
+                        if resolution:
+                            print(f"🔬 DEBUG ENCODED BP2 Adding resolution: {resolution} {resolution_unit}")
+                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=description, extratags=extratags,
+                                           resolution=resolution, resolutionunit=resolution_unit)
+                        else:
+                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
+                                           bigtiff=True, description=description, extratags=extratags)
+                        print(f"🔬 DEBUG ENCODED BP2 Fallback written to: {filename2}")
                     if show_progress_bar:
                         progress_bar.update(num_frames)
                         progress_bar.close()
