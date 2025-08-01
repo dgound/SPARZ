@@ -864,14 +864,20 @@ class SPARZIP:
             for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
                 flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
-                # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp1_part_'+str(i)+'.npz',self.processed_bp1[i]))
-                saves.append(delayed(sparse.save_npz)(self.output_path+flnm1+'.npz',self.processed_bp1[i]))
-                # saves.append(delayed(self.compress_joblib)(self.output_path+flnm1+'.sparz',self.processed_bp1[i]))
+                
+                # Get metadata for this file
+                metadata_bp1_entry = self.metadata_bp1[i] if hasattr(self, 'metadata_bp1') and self.metadata_bp1 and i < len(self.metadata_bp1) else None
+                
+                # Use new method that includes metadata
+                saves.append(delayed(self.save_npz_with_metadata)(self.output_path+flnm1+'.npz', self.processed_bp1[i], metadata_bp1_entry))
+                
                 if self.single_plane == False:
                     flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
-                    # saves.append(delayed(self.compress_joblib)(self.output_path+flnm2+'.sparz',self.processed_bp2[i]))
-                    # saves.append(delayed(sparse.save_npz)(self.output_path+self.stem+'_peaks_bp2_part_'+str(i)+'.npz',self.processed_bp2[i]))
-                    saves.append(delayed(sparse.save_npz)(self.output_path+flnm2+'.npz',self.processed_bp2[i]))
+                    
+                    # Get metadata for BP2 file
+                    metadata_bp2_entry = self.metadata_bp2[i] if hasattr(self, 'metadata_bp2') and self.metadata_bp2 and i < len(self.metadata_bp2) else None
+                    
+                    saves.append(delayed(self.save_npz_with_metadata)(self.output_path+flnm2+'.npz', self.processed_bp2[i], metadata_bp2_entry))
             # Perform the save_npz operations
             if show_progress_bar:
                 progress_bar = tqdm(total=len(saves), desc="Creating sparse matrices", position=0, leave=True)
@@ -1292,41 +1298,50 @@ class SPARZIP:
         
         return significant_variation
 
+    def save_npz_with_metadata(self, filepath, sparse_matrix, metadata_entry):
+        """
+        Save sparse matrix with associated metadata to NPZ file.
+        Based on the original save_sparse_with_metadata design from commit 45e86e9.
+        """
+        try:
+            # Convert sparse matrix to COO format and compute if needed (from original design)
+            if hasattr(sparse_matrix, 'compute'):
+                sparse_data = sparse_matrix.compute()
+            else:
+                sparse_data = sparse_matrix
+            
+            # Ensure it's in COO format
+            if hasattr(sparse_data, 'tocoo') and not isinstance(sparse_data, sparse.COO):
+                sparse_data = sparse_data.tocoo()
+            
+            # Serialize the metadata entry
+            if metadata_entry:
+                serialized_metadata = serialize_metadata([metadata_entry])[0]  # Get single entry
+            else:
+                serialized_metadata = {}
+            
+            # Prepare data dictionary (following original structure but with improved metadata)
+            data_to_save = {
+                'data': sparse_data.data,
+                'coords': sparse_data.coords,
+                'shape': sparse_data.shape,
+                'metadata': json.dumps(serialized_metadata, ensure_ascii=False)  # Use 'metadata' key like original
+            }
+            
+            # Save using numpy's compressed format (following original approach)
+            np.savez_compressed(filepath, **data_to_save)
+            
+        except Exception as e:
+            print(f'Error saving NPZ with metadata to {filepath}: {e}')
+            # Fallback to standard sparse save
+            sparse.save_npz(filepath, sparse_matrix)
+    
     def save_metadata(self):
         """
         Save extracted metadata to JSON files for later restoration.
+        NOTE: This is now integrated into NPZ saving process.
         """
-        print('Saving metadata for lossless restoration...')
-        
-        # Save BP1 metadata
-        if hasattr(self, 'metadata_bp1') and self.metadata_bp1:
-            metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
-            
-            try:
-                serialized_metadata_bp1 = serialize_metadata(self.metadata_bp1)
-                
-                with open(metadata_file_bp1, 'w') as f:
-                    json.dump(serialized_metadata_bp1, f, indent=2, ensure_ascii=False)
-                
-                print(f'Saved BP1 metadata to {metadata_file_bp1}')
-                
-            except Exception as e:
-                print(f'Error saving BP1 metadata: {e}')
-        
-        # Save BP2 metadata if it exists
-        if hasattr(self, 'metadata_bp2') and self.metadata_bp2:
-            metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
-            
-            try:
-                serialized_metadata_bp2 = serialize_metadata(self.metadata_bp2)
-                
-                with open(metadata_file_bp2, 'w') as f:
-                    json.dump(serialized_metadata_bp2, f, indent=2, ensure_ascii=False)
-                
-                print(f'Saved BP2 metadata to {metadata_file_bp2}')
-                
-            except Exception as e:
-                print(f'Error saving BP2 metadata: {e}')
+        print('Metadata saving is now integrated into NPZ file creation...')
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if codec!='zstd' and compute_zstd_dict:
@@ -1413,67 +1428,93 @@ class SPARUNZIP:
         if self.metadata_bp2:
             self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
 
+    def load_metadata_from_npz(self, npz_file_path):
+        """
+        Load metadata from NPZ file that was saved with sparse matrix.
+        Compatible with both original (45e86e9) and current formats.
+        """
+        try:
+            # Load the NPZ file
+            npz_data = np.load(npz_file_path, allow_pickle=True)
+            
+            # Check for metadata in different formats
+            if 'metadata' in npz_data:
+                # Original format from 45e86e9 - use 'metadata' key
+                metadata_json_str = npz_data['metadata'].item()
+                metadata = json.loads(metadata_json_str)
+                return metadata
+            elif 'metadata_json' in npz_data:
+                # Current format - use 'metadata_json' key
+                metadata_json_str = npz_data['metadata_json'].item()
+                metadata = json.loads(metadata_json_str)
+                return metadata
+            else:
+                print(f'⚠️  No metadata found in {npz_file_path} (old format)')
+                return {}
+                
+        except Exception as e:
+            print(f'❌ Error loading metadata from {npz_file_path}: {e}')
+            return {}
+
     def load_original_metadata(self):
         """
-        Load original TIFF metadata from JSON files saved during compression.
+        Load original TIFF metadata from NPZ files saved during compression.
         """
-        print('Loading original metadata for lossless restoration...')
+        print('Loading original metadata from NPZ files for lossless restoration...')
         
-        # Try to load BP1 metadata
-        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
-        print(f'DEBUG: Looking for metadata file: {metadata_file_bp1}')
-        print(f'DEBUG: output_path = "{self.output_path}"')
-        print(f'DEBUG: stem = "{self.stem}"')
-        print(f'DEBUG: File exists? {os.path.exists(metadata_file_bp1)}')
-        
+        # Load BP1 metadata from sparse NPZ files
         metadata_bp1 = []
-        
-        if os.path.exists(metadata_file_bp1):
-            try:
-                with open(metadata_file_bp1, 'r') as f:
-                    metadata_bp1 = json.load(f)
-                print(f'✅ Loaded original BP1 metadata from {metadata_file_bp1}')
-                print(f'DEBUG: Loaded {len(metadata_bp1)} metadata entries')
-            except Exception as e:
-                print(f'Error loading BP1 metadata: {e}')
-                # Fallback to encoded metadata
+        try:
+            # Get all BP1 NPZ files that match the pattern
+            bp1_pattern = os.path.join(self.output_path, '*.npz')
+            bp1_files = sorted(glob.glob(bp1_pattern))
+            
+            print(f'DEBUG: Looking for NPZ files in: {self.output_path}')
+            print(f'DEBUG: Found {len(bp1_files)} NPZ files')
+            
+            for npz_file in bp1_files:
+                # Skip BP2 files (we'll handle them separately)
+                if '_bp2_' in npz_file or npz_file.endswith('_bp2.npz'):
+                    continue
+                    
+                metadata_entry = self.load_metadata_from_npz(npz_file)
+                if metadata_entry:
+                    metadata_bp1.append(metadata_entry)
+                    
+            if metadata_bp1:
+                print(f'✅ Loaded original BP1 metadata from {len(metadata_bp1)} NPZ files')
+            else:
+                print('⚠️  No BP1 metadata found in NPZ files, using encoded file metadata')
                 metadata_bp1, _ = self.extract_encoded_metadata()
-        else:
-            print('❌ No original BP1 metadata found, using encoded file metadata')
-            print(f'DEBUG: Expected file: {metadata_file_bp1}')
-            
-            # Let's also check if metadata exists with different naming patterns
-            base_dir = os.path.dirname(metadata_file_bp1) if os.path.dirname(metadata_file_bp1) else self.output_path
-            if os.path.exists(base_dir):
-                try:
-                    all_files = os.listdir(base_dir)
-                    json_files = [f for f in all_files if f.endswith('_metadata_bp1.json')]
-                    if json_files:
-                        print(f'DEBUG: Found these metadata files in directory: {json_files}')
-                        print(f'DEBUG: You might need to use a different stem parameter')
-                    else:
-                        print(f'DEBUG: No *_metadata_bp1.json files found in {base_dir}')
-                except Exception as e:
-                    print(f'DEBUG: Error listing directory: {e}')
-            
+                
+        except Exception as e:
+            print(f'❌ Error loading BP1 metadata from NPZ: {e}')
             metadata_bp1, _ = self.extract_encoded_metadata()
         
-        # Try to load BP2 metadata
+        # Load BP2 metadata if BP2 exists
         metadata_bp2 = None
         if self.path_encoded_bp2:  # Only if BP2 exists
-            metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
-            
-            if os.path.exists(metadata_file_bp2):
-                try:
-                    with open(metadata_file_bp2, 'r') as f:
-                        metadata_bp2 = json.load(f)
-                    print(f'✅ Loaded original BP2 metadata from {metadata_file_bp2}')
-                except Exception as e:
-                    print(f'Error loading BP2 metadata: {e}')
-                    # Fallback to encoded metadata
+            try:
+                bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
+                
+                if bp2_files:
+                    metadata_bp2 = []
+                    for npz_file in sorted(bp2_files):
+                        metadata_entry = self.load_metadata_from_npz(npz_file)
+                        if metadata_entry:
+                            metadata_bp2.append(metadata_entry)
+                            
+                    if metadata_bp2:
+                        print(f'✅ Loaded original BP2 metadata from {len(metadata_bp2)} NPZ files')
+                    else:
+                        print('⚠️  No BP2 metadata found in NPZ files, using encoded file metadata')
+                        _, metadata_bp2 = self.extract_encoded_metadata()
+                else:
+                    print('⚠️  No BP2 NPZ files found, using encoded file metadata') 
                     _, metadata_bp2 = self.extract_encoded_metadata()
-            else:
-                print('No original BP2 metadata found, using encoded file metadata')
+                    
+            except Exception as e:
+                print(f'❌ Error loading BP2 metadata from NPZ: {e}')
                 _, metadata_bp2 = self.extract_encoded_metadata()
         
         return metadata_bp1, metadata_bp2
@@ -1642,22 +1683,37 @@ class SPARUNZIP:
         
         with tifffile.TiffWriter(filename, bigtiff=True) as tif:
             for frame_idx, frame_data in enumerate(all_frames):
-                # Get frame-specific metadata
-                frame_metadata = {}
+                # Prepare extratags for frame-specific metadata
+                frame_extratags = []
+                
                 if frame_idx < len(individual_ifds):
                     ifd_data = individual_ifds[frame_idx]
                     frame_tags = ifd_data.get('tags', {})
                     
-                    # Convert frame-specific tags to tifffile format
+                    # Convert frame-specific tags to extratags format
                     for tag_name, tag_value in frame_tags.items():
                         if tag_name.startswith('tag_') and tag_name[4:].isdigit():
                             # Numeric tag
                             tag_code = int(tag_name[4:])
-                            if isinstance(tag_value, (int, float)):
-                                frame_metadata[tag_code] = tag_value
+                            
+                            # Skip basic TIFF tags that are handled automatically
+                            if tag_code in [256, 257, 258, 259, 262, 273, 277, 278, 279, 282, 283, 296]:
+                                continue
+                            
+                            # Determine the tag type and format extratag
+                            if isinstance(tag_value, int):
+                                frame_extratags.append((tag_code, 'I', 1, tag_value, True))
+                            elif isinstance(tag_value, float):
+                                frame_extratags.append((tag_code, 'f', 1, tag_value, True))
                             elif isinstance(tag_value, str):
-                                frame_metadata[tag_code] = tag_value
-                        # Could add more tag conversions here as needed
+                                frame_extratags.append((tag_code, 's', 0, tag_value, True))
+                            elif isinstance(tag_value, (list, tuple)):
+                                # Handle arrays/lists
+                                if len(tag_value) > 0:
+                                    if isinstance(tag_value[0], int):
+                                        frame_extratags.append((tag_code, 'I', len(tag_value), tag_value, True))
+                                    elif isinstance(tag_value[0], float):
+                                        frame_extratags.append((tag_code, 'f', len(tag_value), tag_value, True))
                 
                 # Write frame with its specific metadata
                 if frame_idx == 0:
@@ -1673,12 +1729,12 @@ class SPARUNZIP:
                              description=description,
                              resolution=resolution if resolution else None,
                              resolutionunit=resolution_unit if resolution_unit else None,
-                             metadata=frame_metadata)
+                             extratags=frame_extratags if frame_extratags else None)
                 else:
                     # Subsequent frames get individual metadata
                     tif.write(frame_data,
                              photometric='minisblack', 
-                             metadata=frame_metadata)
+                             extratags=frame_extratags if frame_extratags else None)
                 
                 if frame_idx % 500 == 0:  # Progress indicator
                     print(f"📝 Written frame {frame_idx}/{len(all_frames)}")
@@ -1749,6 +1805,46 @@ class SPARUNZIP:
     #         bp1.append(joblib.load(files_bp1[i]))
     #     return bp1, None
 
+    def load_sparse_matrix_from_npz(self, npz_file_path):
+        """
+        Load sparse matrix from NPZ file, handling multiple formats.
+        Compatible with original (45e86e9), current, and legacy formats.
+        """
+        try:
+            npz_data = np.load(npz_file_path, allow_pickle=True)
+            
+            # Check for original format from 45e86e9 (data, coords, shape)
+            if 'data' in npz_data and 'coords' in npz_data and 'shape' in npz_data:
+                # Original format: reconstruct sparse matrix from coords
+                data = npz_data['data']
+                coords = npz_data['coords']
+                shape = tuple(npz_data['shape'])
+                
+                # Reconstruct sparse matrix
+                sparse_matrix = sparse.COO(coords=coords, data=data, shape=shape)
+                return sparse_matrix
+            
+            # Check for current format with separate row/col arrays
+            elif 'data' in npz_data and 'row' in npz_data and 'col' in npz_data and 'shape' in npz_data:
+                # Current format: reconstruct sparse matrix from separate row/col
+                data = npz_data['data']
+                row = npz_data['row'] 
+                col = npz_data['col']
+                shape = tuple(npz_data['shape'])
+                
+                # Reconstruct sparse matrix
+                sparse_matrix = sparse.COO(coords=[row, col], data=data, shape=shape)
+                return sparse_matrix
+            
+            else:
+                # Legacy format: fallback to sparse.load_npz
+                return sparse.load_npz(npz_file_path)
+                
+        except Exception as e:
+            print(f'❌ Error loading sparse matrix from {npz_file_path}: {e}')
+            # Final fallback
+            return sparse.load_npz(npz_file_path)
+
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
         files_bp1 = sorted(glob.glob(sparse_bp1))
@@ -1757,12 +1853,15 @@ class SPARUNZIP:
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp1,bp2 = [],[]
             for i in range(len(files_bp1)):
-                bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
-                bp2.append(da.from_array(sparse.load_npz(files_bp2[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+                sparse_matrix_bp1 = self.load_sparse_matrix_from_npz(files_bp1[i])
+                sparse_matrix_bp2 = self.load_sparse_matrix_from_npz(files_bp2[i])
+                bp1.append(da.from_array(sparse_matrix_bp1, chunks=(1,shapes[i][1],shapes[i][2])))
+                bp2.append(da.from_array(sparse_matrix_bp2, chunks=(1,shapes[i][1],shapes[i][2])))
             return bp1, bp2
         bp1 =[]
         for i in range(len(files_bp1)):
-            bp1.append(da.from_array(sparse.load_npz(files_bp1[i]), chunks=(1,shapes[i][1],shapes[i][2])))
+            sparse_matrix_bp1 = self.load_sparse_matrix_from_npz(files_bp1[i])
+            bp1.append(da.from_array(sparse_matrix_bp1, chunks=(1,shapes[i][1],shapes[i][2])))
         return bp1, None
 
 
