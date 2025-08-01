@@ -606,6 +606,11 @@ class SPARZIP:
                                 ifd_metadata['tags'] = ifd_tags
                                 metadata['individual_ifds'].append(ifd_metadata)
                             
+                            # Detect if individual IFD metadata varies significantly
+                            metadata['requires_individual_ifd_writing'] = self._detect_individual_ifd_variation(metadata['individual_ifds'])
+                            if metadata['requires_individual_ifd_writing']:
+                                print(f"🔍 Detected significant IFD variation - will use frame-by-frame writing")
+                            
                             # ImageJ metadata
                             if tif.is_imagej:
                                 try:
@@ -704,6 +709,11 @@ class SPARZIP:
                                     
                                     ifd_metadata['tags'] = ifd_tags
                                     metadata['individual_ifds'].append(ifd_metadata)
+                                
+                                # Detect if individual IFD metadata varies significantly
+                                metadata['requires_individual_ifd_writing'] = self._detect_individual_ifd_variation(metadata['individual_ifds'])
+                                if metadata['requires_individual_ifd_writing']:
+                                    print(f"🔍 Detected significant IFD variation in BP2 - will use frame-by-frame writing")
                                 
                                 # ImageJ metadata
                                 if tif.is_imagej:
@@ -1226,6 +1236,62 @@ class SPARZIP:
             except Exception as e:
                 print(f"Error during compression: {e}")
 
+    def _detect_individual_ifd_variation(self, individual_ifds):
+        """
+        Detect if individual IFD metadata varies significantly between frames.
+        Returns True if frame-by-frame writing is needed.
+        """
+        if not individual_ifds or len(individual_ifds) <= 1:
+            return False
+        
+        # Get reference metadata from first frame
+        first_frame_tags = individual_ifds[0].get('tags', {})
+        
+        # List of tags that are allowed to vary between frames (these don't count as "significant variation")
+        frame_varying_tags = {
+            'StripOffsets', 'StripByteCounts', 'TileOffsets', 'TileByteCounts',
+            'tag_273', 'tag_279', 'tag_324', 'tag_325',  # Numeric equivalents
+            'PageNumber', 'tag_297'
+        }
+        
+        # Check for significant variations
+        variation_count = 0
+        checked_tags = set()
+        
+        for frame_idx, ifd in enumerate(individual_ifds[1:], 1):  # Skip first frame
+            frame_tags = ifd.get('tags', {})
+            
+            # Check for tags that exist in first frame but not in this frame
+            for tag_name, tag_value in first_frame_tags.items():
+                if tag_name in frame_varying_tags:
+                    continue
+                    
+                if tag_name not in checked_tags:
+                    checked_tags.add(tag_name)
+                    
+                    if tag_name not in frame_tags:
+                        variation_count += 1
+                        print(f"🔍 IFD variation: {tag_name} missing in frame {frame_idx}")
+                    elif frame_tags[tag_name] != tag_value:
+                        variation_count += 1
+                        print(f"🔍 IFD variation: {tag_name} differs in frame {frame_idx}: {frame_tags[tag_name]} vs {tag_value}")
+            
+            # Check for tags that exist in this frame but not in first frame
+            for tag_name in frame_tags:
+                if tag_name in frame_varying_tags or tag_name in first_frame_tags:
+                    continue
+                if tag_name not in checked_tags:
+                    checked_tags.add(tag_name)
+                    variation_count += 1
+                    print(f"🔍 IFD variation: {tag_name} only in frame {frame_idx}")
+        
+        # If we found significant variations, recommend frame-by-frame writing
+        significant_variation = variation_count > 0
+        if significant_variation:
+            print(f"🔍 Found {variation_count} significant IFD variations across {len(individual_ifds)} frames")
+        
+        return significant_variation
+
     def save_metadata(self):
         """
         Save extracted metadata to JSON files for later restoration.
@@ -1561,6 +1627,108 @@ class SPARUNZIP:
         
         return resolution, resolution_unit
 
+    def write_tiff_with_individual_ifds(self, filename, all_frames, file_metadata):
+        """
+        Write TIFF file with individual IFD metadata for each frame using TiffWriter.
+        Used when requires_individual_ifd_writing is True.
+        """
+        print(f"📝 Writing TIFF with individual IFD metadata: {filename}")
+        
+        # Extract global resolution information
+        resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+        
+        # Get individual IFD metadata
+        individual_ifds = file_metadata.get('individual_ifds', [])
+        
+        with tifffile.TiffWriter(filename, bigtiff=True) as tif:
+            for frame_idx, frame_data in enumerate(all_frames):
+                # Get frame-specific metadata
+                frame_metadata = {}
+                if frame_idx < len(individual_ifds):
+                    ifd_data = individual_ifds[frame_idx]
+                    frame_tags = ifd_data.get('tags', {})
+                    
+                    # Convert frame-specific tags to tifffile format
+                    for tag_name, tag_value in frame_tags.items():
+                        if tag_name.startswith('tag_') and tag_name[4:].isdigit():
+                            # Numeric tag
+                            tag_code = int(tag_name[4:])
+                            if isinstance(tag_value, (int, float)):
+                                frame_metadata[tag_code] = tag_value
+                            elif isinstance(tag_value, str):
+                                frame_metadata[tag_code] = tag_value
+                        # Could add more tag conversions here as needed
+                
+                # Write frame with its specific metadata
+                if frame_idx == 0:
+                    # First frame gets global metadata too
+                    description = None
+                    if file_metadata.get('is_ome') and 'ome_xml' in file_metadata:
+                        description = file_metadata['ome_xml']
+                    elif 'tags' in file_metadata and 'ImageDescription' in file_metadata['tags']:
+                        description = file_metadata['tags']['ImageDescription']
+                    
+                    tif.write(frame_data, 
+                             photometric='minisblack',
+                             description=description,
+                             resolution=resolution if resolution else None,
+                             resolutionunit=resolution_unit if resolution_unit else None,
+                             metadata=frame_metadata)
+                else:
+                    # Subsequent frames get individual metadata
+                    tif.write(frame_data,
+                             photometric='minisblack', 
+                             metadata=frame_metadata)
+                
+                if frame_idx % 500 == 0:  # Progress indicator
+                    print(f"📝 Written frame {frame_idx}/{len(all_frames)}")
+        
+        print(f"✅ Completed frame-by-frame TIFF writing: {filename}")
+
+    def write_tiff_file(self, filename, all_frames, file_metadata, debug_prefix=""):
+        """
+        Helper method to write TIFF files with proper metadata handling.
+        Automatically chooses between bulk writing and frame-by-frame writing.
+        """
+        requires_individual_writing = file_metadata.get('requires_individual_ifd_writing', False)
+        print(f"🔬 DEBUG {debug_prefix}Requires individual IFD writing: {requires_individual_writing}")
+        
+        if requires_individual_writing:
+            # Use frame-by-frame writing for individual IFD metadata
+            self.write_tiff_with_individual_ifds(filename, all_frames, file_metadata)
+        else:
+            # Use standard bulk writing
+            ome_condition = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
+            resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+            
+            if ome_condition:
+                # For OME-TIFF files, use the original OME-XML
+                original_ome_xml = file_metadata['ome_xml']
+                print(f"🔬 DEBUG {debug_prefix}Taking OME-XML path, description length: {len(original_ome_xml)}")
+                if resolution:
+                    print(f"🔬 DEBUG {debug_prefix}Adding resolution: {resolution} {resolution_unit}")
+                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                                   bigtiff=True, description=original_ome_xml, 
+                                   resolution=resolution, resolutionunit=resolution_unit)
+                else:
+                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                                   bigtiff=True, description=original_ome_xml)
+                print(f"🔬 DEBUG {debug_prefix}OME-XML written to: {filename}")
+            else:
+                # For non-OME files, use standard metadata
+                print(f"🔬 DEBUG {debug_prefix}Taking fallback path - using format_metadata_for_tifffile")
+                description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+                print(f"🔬 DEBUG {debug_prefix}Fallback description: {description[:100] if description else 'None'}...")
+                if resolution:
+                    print(f"🔬 DEBUG {debug_prefix}Adding resolution: {resolution} {resolution_unit}")
+                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                                   bigtiff=True, description=description, extratags=extratags,
+                                   resolution=resolution, resolutionunit=resolution_unit)
+                else:
+                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                                   bigtiff=True, description=description, extratags=extratags)
+                print(f"🔬 DEBUG {debug_prefix}Fallback written to: {filename}")
+
     # def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
     #     print ('Loading sparse matrices...')
     #     files_bp1 = sorted(glob.glob(path_sparse_bp1))
@@ -1873,36 +2041,8 @@ class SPARUNZIP:
                     ome_condition = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
                     print(f"🔬 DEBUG OME condition: {ome_condition}")
                     
-                    # Extract resolution information
-                    resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
-                    
-                    if ome_condition:
-                        # For OME-TIFF files, use the original OME-XML
-                        original_ome_xml = file_metadata['ome_xml']
-                        print(f"🔬 DEBUG Taking OME-XML path, description length: {len(original_ome_xml)}")
-                        if resolution:
-                            print(f"🔬 DEBUG Adding resolution: {resolution} {resolution_unit}")
-                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=original_ome_xml, 
-                                           resolution=resolution, resolutionunit=resolution_unit)
-                        else:
-                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=original_ome_xml)
-                        print(f"🔬 DEBUG OME-XML written to: {tiff_filename1}")
-                    else:
-                        # For non-OME files, use standard metadata
-                        print(f"🔬 DEBUG Taking fallback path - using format_metadata_for_tifffile")
-                        description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                        print(f"🔬 DEBUG Fallback description: {description[:100]}...")
-                        if resolution:
-                            print(f"🔬 DEBUG Adding resolution: {resolution} {resolution_unit}")
-                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=description, extratags=extratags,
-                                           resolution=resolution, resolutionunit=resolution_unit)
-                        else:
-                            tifffile.imwrite(tiff_filename1, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=description, extratags=extratags)
-                        print(f"🔬 DEBUG Fallback written to: {tiff_filename1}")
+                    # Write TIFF with automatic IFD handling
+                    self.write_tiff_file(tiff_filename1, all_frames, file_metadata, debug_prefix="BP1 ")
                     if show_progress_bar:
                         progress_bar1.update(num_frames)
                         progress_bar1.close()
@@ -1927,45 +2067,8 @@ class SPARUNZIP:
                         file_metadata = self.metadata_bp2[k] if self.metadata_bp2 and k < len(self.metadata_bp2) else {}
                         
                         # DEBUG: Print metadata debugging info for BP2
-                        print(f"🔬 DEBUG BP2 metadata_bp2 length: {len(self.metadata_bp2) if self.metadata_bp2 else 0}")
-                        print(f"🔬 DEBUG BP2 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
-                        print(f"🔬 DEBUG BP2 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
-                        print(f"🔬 DEBUG BP2 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
-                        
-                        # Use imwrite instead of TiffWriter for OME-XML compatibility
-                        ome_condition_bp2 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
-                        print(f"🔬 DEBUG BP2 OME condition: {ome_condition_bp2}")
-                        
-                        # Extract resolution information
-                        resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
-                        
-                        if ome_condition_bp2:
-                            # For OME-TIFF files, use the original OME-XML
-                            original_ome_xml = file_metadata['ome_xml']
-                            print(f"🔬 DEBUG BP2 Taking OME-XML path, description length: {len(original_ome_xml)}")
-                            if resolution:
-                                print(f"🔬 DEBUG BP2 Adding resolution: {resolution} {resolution_unit}")
-                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
-                                               bigtiff=True, description=original_ome_xml,
-                                               resolution=resolution, resolutionunit=resolution_unit)
-                            else:
-                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
-                                               bigtiff=True, description=original_ome_xml)
-                            print(f"🔬 DEBUG BP2 OME-XML written to: {tiff_filename2}")
-                        else:
-                            # For non-OME files, use standard metadata
-                            print(f"🔬 DEBUG BP2 Taking fallback path - using format_metadata_for_tifffile")
-                            description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                            print(f"🔬 DEBUG BP2 Fallback description: {description[:100]}...")
-                            if resolution:
-                                print(f"🔬 DEBUG BP2 Adding resolution: {resolution} {resolution_unit}")
-                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
-                                               bigtiff=True, description=description, extratags=extratags,
-                                               resolution=resolution, resolutionunit=resolution_unit)
-                            else:
-                                tifffile.imwrite(tiff_filename2, all_frames, photometric='minisblack', 
-                                               bigtiff=True, description=description, extratags=extratags)
-                            print(f"🔬 DEBUG BP2 Fallback written to: {tiff_filename2}")
+                        # Write TIFF with automatic IFD handling
+                        self.write_tiff_file(tiff_filename2, all_frames, file_metadata, debug_prefix="BP2 ")
                         if show_progress_bar:
                             progress_bar2.update(num_frames)
                             progress_bar2.close()
@@ -1999,46 +2102,8 @@ class SPARUNZIP:
                 # Get metadata for this file
                 file_metadata = self.metadata_bp1[k] if k < len(self.metadata_bp1) else {}
                 
-                # DEBUG: Print metadata debugging info for ENCODED BP1
-                print(f"🔬 DEBUG ENCODED BP1 metadata_bp1 length: {len(self.metadata_bp1) if self.metadata_bp1 else 0}")
-                print(f"🔬 DEBUG ENCODED BP1 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
-                print(f"🔬 DEBUG ENCODED BP1 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
-                print(f"🔬 DEBUG ENCODED BP1 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
-                
-                # Use imwrite instead of TiffWriter for OME-XML compatibility
-                ome_condition_enc_bp1 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
-                print(f"🔬 DEBUG ENCODED BP1 OME condition: {ome_condition_enc_bp1}")
-                
-                # Extract resolution information
-                resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
-                
-                if ome_condition_enc_bp1:
-                    # For OME-TIFF files, use the original OME-XML
-                    original_ome_xml = file_metadata['ome_xml']
-                    print(f"🔬 DEBUG ENCODED BP1 Taking OME-XML path, description length: {len(original_ome_xml)}")
-                    if resolution:
-                        print(f"🔬 DEBUG ENCODED BP1 Adding resolution: {resolution} {resolution_unit}")
-                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
-                                       bigtiff=True, description=original_ome_xml,
-                                       resolution=resolution, resolutionunit=resolution_unit)
-                    else:
-                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
-                                       bigtiff=True, description=original_ome_xml)
-                    print(f"🔬 DEBUG ENCODED BP1 OME-XML written to: {filename1}")
-                else:
-                    # For non-OME files, use standard metadata
-                    print(f"🔬 DEBUG ENCODED BP1 Taking fallback path - using format_metadata_for_tifffile")
-                    description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                    print(f"🔬 DEBUG ENCODED BP1 Fallback description: {description[:100]}...")
-                    if resolution:
-                        print(f"🔬 DEBUG ENCODED BP1 Adding resolution: {resolution} {resolution_unit}")
-                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
-                                       bigtiff=True, description=description, extratags=extratags,
-                                       resolution=resolution, resolutionunit=resolution_unit)
-                    else:
-                        tifffile.imwrite(filename1, all_frames, photometric='minisblack', 
-                                       bigtiff=True, description=description, extratags=extratags)
-                    print(f"🔬 DEBUG ENCODED BP1 Fallback written to: {filename1}")
+                # Write TIFF with automatic IFD handling
+                self.write_tiff_file(filename1, all_frames, file_metadata, debug_prefix="ENCODED BP1 ")
                 if show_progress_bar:
                     progress_bar.update(num_frames)
                     progress_bar.close()
@@ -2056,46 +2121,8 @@ class SPARUNZIP:
                     # Get metadata for this file
                     file_metadata = self.metadata_bp2[k] if self.metadata_bp2 and k < len(self.metadata_bp2) else {}
                     
-                    # DEBUG: Print metadata debugging info for ENCODED BP2
-                    print(f"🔬 DEBUG ENCODED BP2 metadata_bp2 length: {len(self.metadata_bp2) if self.metadata_bp2 else 0}")
-                    print(f"🔬 DEBUG ENCODED BP2 k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
-                    print(f"🔬 DEBUG ENCODED BP2 is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
-                    print(f"🔬 DEBUG ENCODED BP2 has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
-                    
-                    # Use imwrite instead of TiffWriter for OME-XML compatibility
-                    ome_condition_enc_bp2 = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
-                    print(f"🔬 DEBUG ENCODED BP2 OME condition: {ome_condition_enc_bp2}")
-                    
-                    # Extract resolution information
-                    resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
-                    
-                    if ome_condition_enc_bp2:
-                        # For OME-TIFF files, use the original OME-XML
-                        original_ome_xml = file_metadata['ome_xml']
-                        print(f"🔬 DEBUG ENCODED BP2 Taking OME-XML path, description length: {len(original_ome_xml)}")
-                        if resolution:
-                            print(f"🔬 DEBUG ENCODED BP2 Adding resolution: {resolution} {resolution_unit}")
-                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=original_ome_xml,
-                                           resolution=resolution, resolutionunit=resolution_unit)
-                        else:
-                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=original_ome_xml)
-                        print(f"🔬 DEBUG ENCODED BP2 OME-XML written to: {filename2}")
-                    else:
-                        # For non-OME files, use standard metadata
-                        print(f"🔬 DEBUG ENCODED BP2 Taking fallback path - using format_metadata_for_tifffile")
-                        description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                        print(f"🔬 DEBUG ENCODED BP2 Fallback description: {description[:100]}...")
-                        if resolution:
-                            print(f"🔬 DEBUG ENCODED BP2 Adding resolution: {resolution} {resolution_unit}")
-                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=description, extratags=extratags,
-                                           resolution=resolution, resolutionunit=resolution_unit)
-                        else:
-                            tifffile.imwrite(filename2, all_frames, photometric='minisblack', 
-                                           bigtiff=True, description=description, extratags=extratags)
-                        print(f"🔬 DEBUG ENCODED BP2 Fallback written to: {filename2}")
+                    # Write TIFF with automatic IFD handling
+                    self.write_tiff_file(filename2, all_frames, file_metadata, debug_prefix="ENCODED BP2 ")
                     if show_progress_bar:
                         progress_bar.update(num_frames)
                         progress_bar.close()
