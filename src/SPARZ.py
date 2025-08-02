@@ -187,7 +187,8 @@ class SPARZIP:
                  align_planes:bool=False,
                  num_workers:int=4,
                  num_dask_workers:int=2,
-                 extract_metadata:bool=False
+                 extract_metadata:bool=False,
+                 create_single_file:bool=False
                  ):
       
         """
@@ -216,6 +217,8 @@ class SPARZIP:
         extract_metadata : bool, optional
             whether to extract comprehensive TIFF metadata for lossless preservation, by default False
             (Only relevant for TIFF files. DAT files do not contain metadata.)
+        create_single_file : bool, optional
+            whether to package the video and NPZ files into a single MKV container, by default False
 
         """
         # self.codec = codec
@@ -250,6 +253,7 @@ class SPARZIP:
         self.num_dask_workers = num_dask_workers
         self.peak_process = peaks_process
         self.extract_metadata_flag = extract_metadata
+        self.create_single_file = create_single_file
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -265,7 +269,6 @@ class SPARZIP:
         
         # Extract and store metadata from source files (only if enabled)
         if self.extract_metadata_flag:
-            print('Extracting comprehensive TIFF metadata for lossless preservation...')
             self.metadata_bp1, self.metadata_bp2 = self.extract_metadata()
         else:
             # Initialize empty metadata
@@ -1379,6 +1382,107 @@ class SPARZIP:
             self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95, compute_dict=compute_zstd_dict)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
+        
+        # Create single MKV file if requested
+        if self.create_single_file:
+            self.package_to_mkv(codec, compression_level)
+
+    def package_to_mkv(self, codec, compression_level):
+        """
+        Package the video file and NPZ files into a single MKV container.
+        Uses ffmpeg-python to create an MKV file with the video as the main track
+        and NPZ files as attachments.
+        """
+        # Skip MKV packaging for zstd codec (creates .zst files, not video files)
+        if codec == 'zstd':
+            print('MKV packaging not applicable for zstd codec (creates .zst files, not video files).')
+            return
+            
+        print('Packaging files into single MKV container...')
+        
+        # Determine video file extension based on codec
+        if codec == 'prores':
+            video_ext = 'mov'
+        elif codec == 'ffv1':
+            video_ext = 'avi'
+        else:
+            video_ext = 'mp4'  # Default for x265, av1, x264, etc.
+        
+        # Find all generated video files (following the actual naming pattern)
+        video_files = []
+        mkv_files_to_create = []
+        
+        for k in range(len(self.processed_bp1)):
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.{video_ext}'
+            mkv_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.mkv'
+            
+            if os.path.exists(video_name1):
+                video_files.append(video_name1)
+                mkv_files_to_create.append(mkv_name1)
+            
+            # Handle BP2 if not single plane
+            if not self.single_plane:
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.{video_ext}'
+                mkv_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.mkv'
+                
+                if os.path.exists(video_name2):
+                    video_files.append(video_name2)
+                    mkv_files_to_create.append(mkv_name2)
+        
+        if not video_files:
+            print('Warning: No video files found. Skipping MKV packaging.')
+            return
+        
+        # Find all NPZ files
+        npz_pattern = os.path.join(self.output_path, '*.npz')
+        npz_files = glob.glob(npz_pattern)
+        
+        if not npz_files:
+            print('Warning: No NPZ files found. Skipping MKV packaging.')
+            return
+        
+        # Create MKV files for each video file
+        try:
+            for video_file, mkv_file in zip(video_files, mkv_files_to_create):
+                # Build ffmpeg command manually for better control over attachments
+                cmd = [
+                    'ffmpeg', '-y',  # Overwrite output
+                    '-i', video_file,  # Input video
+                ]
+                
+                # Add NPZ files as inputs
+                for i, npz_file in enumerate(npz_files):
+                    cmd.extend(['-attach', npz_file])
+                    # Add metadata for each attachment
+                    cmd.extend(['-metadata:s:t:{}'.format(i), 'mimetype=application/octet-stream'])
+                    cmd.extend(['-metadata:s:t:{}'.format(i), 'filename={}'.format(os.path.basename(npz_file))])
+                
+                # Add output options
+                cmd.extend([
+                    '-c', 'copy',  # Copy streams without re-encoding
+                    '-map', '0:0',  # Map video stream from first input
+                    mkv_file  # Output file
+                ])
+                
+                # Run the command using subprocess instead of ffmpeg-python for attachments
+                import subprocess
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    print(f'FFmpeg command failed: {" ".join(cmd)}')
+                    print(f'Error: {result.stderr}')
+                    continue
+                
+                video_basename = os.path.basename(video_file)
+                mkv_basename = os.path.basename(mkv_file)
+                print(f'Successfully created MKV package: {mkv_basename}')
+                print(f'Video: {video_basename}')
+                print(f'NPZ files: {len(npz_files)} files attached')
+            
+        except Exception as e:
+            print(f'Unexpected error during MKV packaging: {e}')
 
 
 class SPARUNZIP:
@@ -1394,9 +1498,34 @@ class SPARUNZIP:
                  num_dask_workers:int=2,
                  output_format: str = 'tiff'):
         
-        # self.path_encoded_bp1, self.path_encoded_bp2 = path_encoded_bp1, path_encoded_bp2
-        self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
-        self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+        # Store original parameters
+        original_path_sparse_bp1 = path_sparse_bp1
+        original_path_sparse_bp2 = path_sparse_bp2
+        
+        # Initialize temp directory tracking
+        self.temp_dirs_to_cleanup = []
+        
+        # Check if we have MKV files (single-file format)
+        if path_encoded_bp1 and ('.mkv' in path_encoded_bp1 or glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))):
+            # Handle direct MKV path or find MKV files
+            if '.mkv' in path_encoded_bp1:
+                mkv_files = glob.glob(path_encoded_bp1)
+            else:
+                mkv_files = glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))
+            
+            if mkv_files:
+                print(f'Detected MKV single-file format. Extracting components...')
+                self.path_encoded_bp1, self.path_encoded_bp2 = self.extract_from_mkv(mkv_files, path_encoded_bp2)
+                # Update sparse paths to use extracted NPZ files instead of original None values
+                path_sparse_bp1 = self.path_sparse_bp1  # Updated by extract_from_mkv
+                path_sparse_bp2 = self.path_sparse_bp2  # Updated by extract_from_mkv
+            else:
+                raise ValueError("MKV files not found")
+        else:
+            # Traditional separate files
+            self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
+            self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+        
         self.use_roi = use_roi
 
         self.output_format = output_format.lower()
@@ -1444,6 +1573,112 @@ class SPARUNZIP:
         if self.metadata_bp2:
             self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
 
+    def extract_from_mkv(self, mkv_files, path_encoded_bp2):
+        """
+        Extract video and NPZ files from MKV containers.
+        Returns paths to extracted video files and updates sparse file paths.
+        """
+        extracted_video_paths = []
+        
+        for mkv_file in mkv_files:
+            print(f'Extracting from MKV: {mkv_file}')
+            
+            # Create temporary directory for extraction
+            temp_dir = os.path.join(os.path.dirname(mkv_file), 'mkv_temp')
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Track temp directory for cleanup
+            if temp_dir not in self.temp_dirs_to_cleanup:
+                self.temp_dirs_to_cleanup.append(temp_dir)
+            
+            try:
+                # Extract video stream
+                video_name = os.path.splitext(os.path.basename(mkv_file))[0] + '.mp4'
+                video_path = os.path.join(temp_dir, video_name)
+                
+                # Use ffmpeg to extract the video stream
+                ffmpeg.input(mkv_file).output(video_path, vcodec='copy').run(
+                    overwrite_output=True, capture_stdout=True, capture_stderr=True
+                )
+                extracted_video_paths.append(video_path)
+                print(f'Extracted video: {video_name}')
+                
+                # Extract attachments (NPZ files)
+                # Use ffmpeg to get info about attachments
+                probe = ffmpeg.probe(mkv_file)
+                
+                # Find attachment streams and extract using ffmpeg command
+                attachment_count = 0
+                for i, stream in enumerate(probe.get('streams', [])):
+                    if stream.get('codec_type') == 'attachment':
+                        attachment_filename = stream.get('tags', {}).get('filename', f'attachment_{attachment_count}.npz')
+                        attachment_path = os.path.join(temp_dir, attachment_filename)
+                        
+                        # Use subprocess to extract attachment (ffmpeg-python has issues with attachments)
+                        import subprocess
+                        
+                        # Try different FFmpeg syntax for attachment extraction
+                        # Method 1: Using -dump_attachment with proper syntax
+                        cmd = [
+                            'ffmpeg', '-dump_attachment:t:{}'.format(attachment_count), attachment_path,
+                            '-i', mkv_file
+                        ]
+                        
+                        result = subprocess.run(cmd, capture_output=True, text=True)
+                        if result.returncode == 0:
+                            print(f'Extracted NPZ: {attachment_filename}')
+                            attachment_count += 1
+                        else:
+                            # Method 2: Try alternative approach using map and copy
+                            print(f'Method 1 failed, trying alternative extraction for {attachment_filename}')
+                            cmd2 = [
+                                'ffmpeg', '-y', '-i', mkv_file,
+                                '-map', f'0:{i}', '-c', 'copy', attachment_path
+                            ]
+                            
+                            result2 = subprocess.run(cmd2, capture_output=True, text=True)
+                            if result2.returncode == 0 or os.path.exists(attachment_path):
+                                print(f'Extracted NPZ: {attachment_filename} (method 2)')
+                                attachment_count += 1
+                            else:
+                                print(f'Failed to extract {attachment_filename}: {result2.stderr}')
+                
+                print(f'Extracted {attachment_count} NPZ files from {mkv_file}')
+                
+            except ffmpeg.Error as e:
+                print(f'Error extracting from MKV {mkv_file}: {e}')
+                if e.stderr:
+                    print(f'FFmpeg stderr: {e.stderr.decode()}')
+            except Exception as e:
+                print(f'Unexpected error extracting from MKV {mkv_file}: {e}')
+        
+        # Update sparse file paths to point to extracted NPZ files
+        if extracted_video_paths:
+            temp_dir = os.path.dirname(extracted_video_paths[0])
+            # Update sparse paths to point to extracted NPZ files
+            self.path_sparse_bp1 = os.path.join(temp_dir, '*.npz')
+            if path_encoded_bp2:
+                self.path_sparse_bp2 = os.path.join(temp_dir, '*bp2*.npz')  # Assume BP2 files have 'bp2' in name
+            else:
+                self.path_sparse_bp2 = None
+        
+        return extracted_video_paths, None
+
+    def cleanup_temp_directories(self):
+        """
+        Clean up temporary directories created during MKV extraction.
+        """
+        if hasattr(self, 'temp_dirs_to_cleanup') and self.temp_dirs_to_cleanup:
+            import shutil
+            for temp_dir in self.temp_dirs_to_cleanup:
+                try:
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+                        print(f'Cleaned up temporary directory: {temp_dir}')
+                except Exception as e:
+                    print(f'Warning: Failed to cleanup temporary directory {temp_dir}: {e}')
+            self.temp_dirs_to_cleanup = []
+
     def load_metadata_from_npz(self, npz_file_path):
         """
         Load metadata from NPZ file that was saved with sparse matrix.
@@ -1480,8 +1715,11 @@ class SPARUNZIP:
         # Load BP1 metadata from sparse NPZ files
         metadata_bp1 = []
         try:
-            # Get all BP1 NPZ files that match the pattern
-            bp1_pattern = os.path.join(self.output_path, '*.npz')
+            # For MKV files, use path_sparse_bp1; otherwise use output_path
+            if hasattr(self, 'path_sparse_bp1') and self.path_sparse_bp1:
+                bp1_pattern = self.path_sparse_bp1
+            else:
+                bp1_pattern = os.path.join(self.output_path, '*.npz')
             bp1_files = sorted(glob.glob(bp1_pattern))
             
             # print(f'DEBUG: Looking for NPZ files in: {self.output_path}')
@@ -2241,3 +2479,6 @@ class SPARUNZIP:
                         progress_bar.close()
                 gc.collect()
         print('Done.')
+        
+        # Clean up temporary directories used for MKV extraction
+        self.cleanup_temp_directories()
