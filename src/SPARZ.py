@@ -621,8 +621,6 @@ class SPARZIP:
                             
                             # Detect if individual IFD metadata varies significantly
                             metadata['requires_individual_ifd_writing'] = self._detect_individual_ifd_variation(metadata['individual_ifds'])
-                            if metadata['requires_individual_ifd_writing']:
-                                print(f"🔍 Detected significant IFD variation - will use frame-by-frame writing")
                             
                             # ImageJ metadata
                             if tif.is_imagej:
@@ -728,8 +726,6 @@ class SPARZIP:
                                 
                                 # Detect if individual IFD metadata varies significantly
                                 metadata['requires_individual_ifd_writing'] = self._detect_individual_ifd_variation(metadata['individual_ifds'])
-                                if metadata['requires_individual_ifd_writing']:
-                                    print(f"🔍 Detected significant IFD variation in BP2 - will use frame-by-frame writing")
                                 
                                 # ImageJ metadata
                                 if tif.is_imagej:
@@ -1296,10 +1292,8 @@ class SPARZIP:
                     
                     if tag_name not in frame_tags:
                         variation_count += 1
-                        print(f"🔍 IFD variation: {tag_name} missing in frame {frame_idx}")
                     elif frame_tags[tag_name] != tag_value:
                         variation_count += 1
-                        print(f"🔍 IFD variation: {tag_name} differs in frame {frame_idx}: {frame_tags[tag_name]} vs {tag_value}")
             
             # Check for tags that exist in this frame but not in first frame
             for tag_name in frame_tags:
@@ -1308,12 +1302,11 @@ class SPARZIP:
                 if tag_name not in checked_tags:
                     checked_tags.add(tag_name)
                     variation_count += 1
-                    print(f"🔍 IFD variation: {tag_name} only in frame {frame_idx}")
         
         # If we found significant variations, recommend frame-by-frame writing
         significant_variation = variation_count > 0
         if significant_variation:
-            print(f"🔍 Found {variation_count} significant IFD variations across {len(individual_ifds)} frames")
+            print(f"Found {variation_count} significant IFD variations across {len(individual_ifds)} frames")
         
         return significant_variation
 
@@ -1362,7 +1355,7 @@ class SPARZIP:
         Only saves metadata if extract_metadata=True was set during initialization.
         """
         if self.extract_metadata_flag:
-            print('Metadata saving is now integrated into NPZ file creation...')
+            print('Extracting and saving metadata...')
         else:
             print('Metadata extraction was disabled - no metadata to save.')
 
@@ -1472,18 +1465,17 @@ class SPARUNZIP:
                 metadata = json.loads(metadata_json_str)
                 return metadata
             else:
-                print(f'⚠️  No metadata found in {npz_file_path} (old format)')
                 return {}
                 
         except Exception as e:
-            print(f'❌ Error loading metadata from {npz_file_path}: {e}')
+            print(f'Error loading metadata from {npz_file_path}: {e}')
             return {}
 
     def load_original_metadata(self):
         """
         Load original TIFF metadata from NPZ files saved during compression.
         """
-        print('Loading original metadata from NPZ files for lossless restoration...')
+        print('Loading metadata...')
         
         # Load BP1 metadata from sparse NPZ files
         metadata_bp1 = []
@@ -1492,8 +1484,8 @@ class SPARUNZIP:
             bp1_pattern = os.path.join(self.output_path, '*.npz')
             bp1_files = sorted(glob.glob(bp1_pattern))
             
-            print(f'DEBUG: Looking for NPZ files in: {self.output_path}')
-            print(f'DEBUG: Found {len(bp1_files)} NPZ files')
+            # print(f'DEBUG: Looking for NPZ files in: {self.output_path}')
+            # print(f'DEBUG: Found {len(bp1_files)} NPZ files')
             
             for npz_file in bp1_files:
                 # Skip BP2 files (we'll handle them separately)
@@ -1505,13 +1497,13 @@ class SPARUNZIP:
                     metadata_bp1.append(metadata_entry)
                     
             if metadata_bp1:
-                print(f'✅ Loaded original BP1 metadata from {len(metadata_bp1)} NPZ files')
+                print(f'Loaded BP1 metadata from {len(metadata_bp1)} NPZ files')
             else:
-                print('⚠️  No BP1 metadata found in NPZ files, using encoded file metadata')
+                print('No BP1 metadata found in NPZ files, using encoded file metadata')
                 metadata_bp1, _ = self.extract_encoded_metadata()
                 
         except Exception as e:
-            print(f'❌ Error loading BP1 metadata from NPZ: {e}')
+            print(f'Error loading BP1 metadata from NPZ: {e}')
             metadata_bp1, _ = self.extract_encoded_metadata()
         
         # Load BP2 metadata if BP2 exists
@@ -1528,16 +1520,16 @@ class SPARUNZIP:
                             metadata_bp2.append(metadata_entry)
                             
                     if metadata_bp2:
-                        print(f'✅ Loaded original BP2 metadata from {len(metadata_bp2)} NPZ files')
+                        print(f'Loaded BP2 metadata from {len(metadata_bp2)} NPZ files')
                     else:
-                        print('⚠️  No BP2 metadata found in NPZ files, using encoded file metadata')
+                        print('No BP2 metadata found in NPZ files, using encoded file metadata')
                         _, metadata_bp2 = self.extract_encoded_metadata()
                 else:
-                    print('⚠️  No BP2 NPZ files found, using encoded file metadata') 
+                    print('No BP2 NPZ files found, using encoded file metadata') 
                     _, metadata_bp2 = self.extract_encoded_metadata()
                     
             except Exception as e:
-                print(f'❌ Error loading BP2 metadata from NPZ: {e}')
+                print(f'Error loading BP2 metadata from NPZ: {e}')
                 _, metadata_bp2 = self.extract_encoded_metadata()
         
         return metadata_bp1, metadata_bp2
@@ -1696,7 +1688,7 @@ class SPARUNZIP:
         Write TIFF file with individual IFD metadata for each frame using TiffWriter.
         Used when requires_individual_ifd_writing is True.
         """
-        print(f"📝 Writing TIFF with individual IFD metadata: {filename}")
+        print(f"Writing TIFF with metadata: {filename}")
         
         # Extract global resolution information
         resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
@@ -1760,9 +1752,9 @@ class SPARUNZIP:
                              extratags=frame_extratags if frame_extratags else None)
                 
                 if frame_idx % 500 == 0:  # Progress indicator
-                    print(f"📝 Written frame {frame_idx}/{len(all_frames)}")
+                    print(f"Written frame {frame_idx}/{len(all_frames)}")
         
-        print(f"✅ Completed frame-by-frame TIFF writing: {filename}")
+        print(f"Completed TIFF writing: {filename}")
 
     def write_tiff_file(self, filename, all_frames, file_metadata, debug_prefix=""):
         """
@@ -1770,7 +1762,7 @@ class SPARUNZIP:
         Automatically chooses between bulk writing and frame-by-frame writing.
         """
         requires_individual_writing = file_metadata.get('requires_individual_ifd_writing', False)
-        print(f"🔬 DEBUG {debug_prefix}Requires individual IFD writing: {requires_individual_writing}")
+        # print(f"{debug_prefix}Requires individual IFD writing: {requires_individual_writing}")
         
         if requires_individual_writing:
             # Use frame-by-frame writing for individual IFD metadata
@@ -1783,30 +1775,30 @@ class SPARUNZIP:
             if ome_condition:
                 # For OME-TIFF files, use the original OME-XML
                 original_ome_xml = file_metadata['ome_xml']
-                print(f"🔬 DEBUG {debug_prefix}Taking OME-XML path, description length: {len(original_ome_xml)}")
+                # print(f"{debug_prefix}Taking OME-XML path, description length: {len(original_ome_xml)}")
                 if resolution:
-                    print(f"🔬 DEBUG {debug_prefix}Adding resolution: {resolution} {resolution_unit}")
+                    # print(f"{debug_prefix}Adding resolution: {resolution} {resolution_unit}")
                     tifffile.imwrite(filename, all_frames, photometric='minisblack', 
                                    bigtiff=True, description=original_ome_xml, 
                                    resolution=resolution, resolutionunit=resolution_unit)
                 else:
                     tifffile.imwrite(filename, all_frames, photometric='minisblack', 
                                    bigtiff=True, description=original_ome_xml)
-                print(f"🔬 DEBUG {debug_prefix}OME-XML written to: {filename}")
+                # print(f"{debug_prefix}OME-XML written to: {filename}")
             else:
                 # For non-OME files, use standard metadata
-                print(f"🔬 DEBUG {debug_prefix}Taking fallback path - using format_metadata_for_tifffile")
+                # print(f"{debug_prefix}Taking fallback path - using format_metadata_for_tifffile")
                 description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                print(f"🔬 DEBUG {debug_prefix}Fallback description: {description[:100] if description else 'None'}...")
+                # print(f"{debug_prefix}Fallback description: {description[:100] if description else 'None'}...")
                 if resolution:
-                    print(f"🔬 DEBUG {debug_prefix}Adding resolution: {resolution} {resolution_unit}")
+                    # print(f"{debug_prefix}Adding resolution: {resolution} {resolution_unit}")
                     tifffile.imwrite(filename, all_frames, photometric='minisblack', 
                                    bigtiff=True, description=description, extratags=extratags,
                                    resolution=resolution, resolutionunit=resolution_unit)
                 else:
                     tifffile.imwrite(filename, all_frames, photometric='minisblack', 
                                    bigtiff=True, description=description, extratags=extratags)
-                print(f"🔬 DEBUG {debug_prefix}Fallback written to: {filename}")
+                # print(f"{debug_prefix}Fallback written to: {filename}")
 
     # def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
     #     print ('Loading sparse matrices...')
@@ -1864,7 +1856,7 @@ class SPARUNZIP:
                 return sparse.load_npz(npz_file_path)
                 
         except Exception as e:
-            print(f'❌ Error loading sparse matrix from {npz_file_path}: {e}')
+            print(f'Error loading sparse matrix from {npz_file_path}: {e}')
             # Final fallback
             return sparse.load_npz(npz_file_path)
 
@@ -2153,15 +2145,14 @@ class SPARUNZIP:
                     # Get metadata for this file
                     file_metadata = self.metadata_bp1[k] if k < len(self.metadata_bp1) else {}
                     
-                    # DEBUG: Print metadata debugging info
-                    print(f"🔬 DEBUG metadata_bp1 length: {len(self.metadata_bp1) if self.metadata_bp1 else 0}")
-                    print(f"🔬 DEBUG k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
-                    print(f"🔬 DEBUG is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
-                    print(f"🔬 DEBUG has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
+                    # print(f"Metadata_bp1 length: {len(self.metadata_bp1) if self.metadata_bp1 else 0}")
+                    # print(f"k={k}, file_metadata keys: {list(file_metadata.keys()) if file_metadata else 'EMPTY'}")
+                    # print(f"is_ome: {file_metadata.get('is_ome') if file_metadata else 'N/A'}")
+                    # print(f"has ome_xml: {'ome_xml' in file_metadata if file_metadata else 'N/A'}")
                     
                     # Use imwrite instead of TiffWriter for OME-XML compatibility
                     ome_condition = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
-                    print(f"🔬 DEBUG OME condition: {ome_condition}")
+                    # print(f"OME condition: {ome_condition}")
                     
                     # Write TIFF with automatic IFD handling
                     self.write_tiff_file(tiff_filename1, all_frames, file_metadata, debug_prefix="BP1 ")
