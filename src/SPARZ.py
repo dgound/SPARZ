@@ -186,7 +186,8 @@ class SPARZIP:
                  find_peaks:bool = True,
                  align_planes:bool=False,
                  num_workers:int=4,
-                 num_dask_workers:int=2
+                 num_dask_workers:int=2,
+                 extract_metadata:bool=False
                  ):
       
         """
@@ -212,6 +213,9 @@ class SPARZIP:
             whether to reflect the second image, by default False
         align_planes : bool, optional
             whether to align the planes, by default False
+        extract_metadata : bool, optional
+            whether to extract comprehensive TIFF metadata for lossless preservation, by default False
+            (Only relevant for TIFF files. DAT files do not contain metadata.)
 
         """
         # self.codec = codec
@@ -245,6 +249,7 @@ class SPARZIP:
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
         self.peak_process = peaks_process
+        self.extract_metadata_flag = extract_metadata
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -258,8 +263,13 @@ class SPARZIP:
 
         self.processed_bp1,self.processed_bp2 = self.process_images()
         
-        # Extract and store metadata from source files
-        self.metadata_bp1, self.metadata_bp2 = self.extract_metadata()
+        # Extract and store metadata from source files (only if enabled)
+        if self.extract_metadata_flag:
+            print('Extracting comprehensive TIFF metadata for lossless preservation...')
+            self.metadata_bp1, self.metadata_bp2 = self.extract_metadata()
+        else:
+            # Initialize empty metadata
+            self.metadata_bp1, self.metadata_bp2 = [], []
         
         if self.peak_process not in [None, 'median']:
             raise ValueError('Peaks process must be either None or median.')
@@ -548,7 +558,10 @@ class SPARZIP:
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
 
     def extract_metadata(self):
-        """Extract comprehensive TIFF metadata including OME-XML from input files"""
+        """
+        Extract comprehensive TIFF metadata including OME-XML from input files.
+        Only processes TIFF files - DAT files don't contain metadata.
+        """
         print('Extracting metadata from source files...')
         metadata_bp1 = []
         
@@ -650,8 +663,11 @@ class SPARZIP:
                 except Exception as e:
                     print(f"Warning: Could not extract metadata from {file_path}: {e}")
                     metadata = {'error': str(e)}
+            elif ext == '.dat':
+                # DAT files don't contain metadata
+                metadata = {'file_type': 'dat', 'has_metadata': False}
             else:
-                metadata = {'file_type': 'non_tiff'}
+                metadata = {'file_type': 'non_tiff', 'has_metadata': False}
                 
             metadata_bp1.append(metadata)
         
@@ -754,8 +770,11 @@ class SPARZIP:
                     except Exception as e:
                         print(f"Warning: Could not extract metadata from {file_path}: {e}")
                         metadata = {'error': str(e)}
+                elif ext == '.dat':
+                    # DAT files don't contain metadata
+                    metadata = {'file_type': 'dat', 'has_metadata': False}
                 else:
-                    metadata = {'file_type': 'non_tiff'}
+                    metadata = {'file_type': 'non_tiff', 'has_metadata': False}
                     
                 metadata_bp2.append(metadata)
         
@@ -1340,8 +1359,12 @@ class SPARZIP:
         """
         Save extracted metadata to JSON files for later restoration.
         NOTE: This is now integrated into NPZ saving process.
+        Only saves metadata if extract_metadata=True was set during initialization.
         """
-        print('Metadata saving is now integrated into NPZ file creation...')
+        if self.extract_metadata_flag:
+            print('Metadata saving is now integrated into NPZ file creation...')
+        else:
+            print('Metadata extraction was disabled - no metadata to save.')
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if codec!='zstd' and compute_zstd_dict:
