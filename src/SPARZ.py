@@ -2107,35 +2107,23 @@ class SPARUNZIP:
             self.write_tiff_with_individual_ifds(filename, all_frames, file_metadata)
         else:
             # Use standard bulk writing
-            ome_condition = file_metadata.get('is_ome') and 'ome_xml' in file_metadata
             resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
             
-            if ome_condition:
-                # For OME-TIFF files, use the original OME-XML
-                original_ome_xml = file_metadata['ome_xml']
-                # print(f"{debug_prefix}Taking OME-XML path, description length: {len(original_ome_xml)}")
-                if resolution:
-                    # print(f"{debug_prefix}Adding resolution: {resolution} {resolution_unit}")
-                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                                   bigtiff=True, description=original_ome_xml, 
-                                   resolution=resolution, resolutionunit=resolution_unit)
-                else:
-                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                                   bigtiff=True, description=original_ome_xml)
-                # print(f"{debug_prefix}OME-XML written to: {filename}")
+            # ALWAYS format metadata to get extratags
+            description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+            
+            # If OME-XML exists, it should be the description, but we keep the other tags
+            if file_metadata.get('is_ome') and 'ome_xml' in file_metadata:
+                description = file_metadata['ome_xml']
+            
+            # Now, write with description and extratags
+            if resolution:
+                tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                               bigtiff=True, description=description, extratags=extratags,
+                               resolution=resolution, resolutionunit=resolution_unit)
             else:
-                # For non-OME files, use standard metadata
-                # print(f"{debug_prefix}Taking fallback path - using format_metadata_for_tifffile")
-                description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
-                # print(f"{debug_prefix}Fallback description: {description[:100] if description else 'None'}...")
-                if resolution:
-                    # print(f"{debug_prefix}Adding resolution: {resolution} {resolution_unit}")
-                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                                   bigtiff=True, description=description, extratags=extratags,
-                                   resolution=resolution, resolutionunit=resolution_unit)
-                else:
-                    tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                                   bigtiff=True, description=description, extratags=extratags)
+                tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                               bigtiff=True, description=description, extratags=extratags)
                 # print(f"{debug_prefix}Fallback written to: {filename}")
 
     # def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
