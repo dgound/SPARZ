@@ -1910,6 +1910,7 @@ class SPARUNZIP:
         Extract video and NPZ files from MKV containers.
         Returns paths to extracted video files and updates sparse file paths.
         """
+        import subprocess
         extracted_video_paths = []
         
         for mkv_file in mkv_files:
@@ -1928,52 +1929,77 @@ class SPARUNZIP:
                 video_name = os.path.splitext(os.path.basename(mkv_file))[0] + '.mp4'
                 video_path = os.path.join(temp_dir, video_name)
                 
-                # Use ffmpeg to extract the video stream
-                ffmpeg.input(mkv_file).output(video_path, vcodec='copy').run(
-                    overwrite_output=True, capture_stdout=True, capture_stderr=True
-                )
-                extracted_video_paths.append(video_path)
-                print(f'Extracted video: {video_name}')
+                # Check if already extracted
+                if os.path.exists(video_path):
+                    print(f'Video already extracted: {video_name}')
+                    extracted_video_paths.append(video_path)
+                else:
+                    # Use ffmpeg to extract the video stream
+                    ffmpeg.input(mkv_file).output(video_path, vcodec='copy').run(
+                        overwrite_output=True, capture_stdout=True, capture_stderr=True
+                    )
+                    extracted_video_paths.append(video_path)
+                    print(f'Extracted video: {video_name}')
                 
                 # Extract attachments (NPZ files)
-                # Use ffmpeg to get info about attachments
+                # First probe to get correct stream indices
                 probe = ffmpeg.probe(mkv_file)
                 
                 # Find attachment streams and extract using ffmpeg command
                 attachment_count = 0
-                for i, stream in enumerate(probe.get('streams', [])):
+                attachment_indices = []  # Store actual stream indices for attachments
+                
+                for stream in probe.get('streams', []):
                     if stream.get('codec_type') == 'attachment':
+                        stream_index = stream['index']
                         attachment_filename = stream.get('tags', {}).get('filename', f'attachment_{attachment_count}.npz')
                         attachment_path = os.path.join(temp_dir, attachment_filename)
                         
-                        # Use subprocess to extract attachment (ffmpeg-python has issues with attachments)
-                        import subprocess
+                        # Check if already extracted
+                        if os.path.exists(attachment_path):
+                            print(f'NPZ already extracted: {attachment_filename}')
+                            attachment_count += 1
+                            continue
                         
-                        # Try different FFmpeg syntax for attachment extraction
-                        # Method 1: Using -dump_attachment with proper syntax
+                        # Use subprocess to extract attachment
+                        # FIXED: Use the actual attachment index for -dump_attachment
+                        # The :t:N syntax needs N to be the attachment index among attachments, not stream index
                         cmd = [
                             'ffmpeg', '-dump_attachment:t:{}'.format(attachment_count), attachment_path,
                             '-i', mkv_file
                         ]
                         
-                        result = subprocess.run(cmd, capture_output=True, text=True)
-                        if result.returncode == 0:
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                        if result.returncode == 0 and os.path.exists(attachment_path):
                             print(f'Extracted NPZ: {attachment_filename}')
                             attachment_count += 1
                         else:
-                            # Method 2: Try alternative approach using map and copy
+                            # Method 2: Use -map with actual stream index
                             print(f'Method 1 failed, trying alternative extraction for {attachment_filename}')
                             cmd2 = [
                                 'ffmpeg', '-y', '-i', mkv_file,
-                                '-map', f'0:{i}', '-c', 'copy', attachment_path
+                                '-map', f'0:{stream_index}',  # Use actual stream index
+                                '-c', 'copy', attachment_path
                             ]
                             
-                            result2 = subprocess.run(cmd2, capture_output=True, text=True)
-                            if result2.returncode == 0 or os.path.exists(attachment_path):
+                            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
+                            if result2.returncode == 0 and os.path.exists(attachment_path):
                                 print(f'Extracted NPZ: {attachment_filename} (method 2)')
                                 attachment_count += 1
                             else:
-                                print(f'Failed to extract {attachment_filename}: {result2.stderr}')
+                                # If both methods fail, try the direct extraction method
+                                cmd3 = [
+                                    'ffmpeg', '-i', mkv_file,
+                                    '-dump_attachment:t', attachment_path
+                                ]
+                                result3 = subprocess.run(cmd3, capture_output=True, text=True, timeout=10)
+                                if result3.returncode == 0 and os.path.exists(attachment_path):
+                                    print(f'Extracted NPZ: {attachment_filename} (method 3)')
+                                    attachment_count += 1
+                                else:
+                                    print(f'Failed to extract {attachment_filename}')
+                                    if result2.stderr:
+                                        print(f'Error: {result2.stderr[:200]}')
                 
                 print(f'Extracted {attachment_count} NPZ files from {mkv_file}')
                 
@@ -1987,8 +2013,22 @@ class SPARUNZIP:
         # Update sparse file paths to point to extracted NPZ files
         if extracted_video_paths:
             temp_dir = os.path.dirname(extracted_video_paths[0])
-            # Update sparse paths to point to extracted NPZ files
-            self.path_sparse_bp1 = os.path.join(temp_dir, '*.npz')
+            # Check for NPZ files in temp directory
+            npz_files = glob.glob(os.path.join(temp_dir, '*.npz'))
+            if npz_files:
+                print(f'Found {len(npz_files)} NPZ files in temp directory')
+                self.path_sparse_bp1 = os.path.join(temp_dir, '*.npz')
+            else:
+                # If no NPZ in temp, check the MKV directory itself
+                mkv_dir = os.path.dirname(mkv_files[0])
+                npz_files = glob.glob(os.path.join(mkv_dir, '*.npz'))
+                if npz_files:
+                    print(f'Using {len(npz_files)} NPZ files from MKV directory')
+                    self.path_sparse_bp1 = os.path.join(mkv_dir, '*.npz')
+                else:
+                    print('Warning: No NPZ files found')
+                    self.path_sparse_bp1 = None
+            
             if path_encoded_bp2:
                 self.path_sparse_bp2 = os.path.join(temp_dir, '*bp2*.npz')  # Assume BP2 files have 'bp2' in name
             else:
