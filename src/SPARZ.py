@@ -188,7 +188,8 @@ class SPARZIP:
                  num_workers:int=4,
                  num_dask_workers:int=2,
                  extract_metadata:bool=False,
-                 create_single_file:bool=False
+                 create_single_file:bool=False,
+                 save_metadata_to_json:bool=False
                  ):
       
         """
@@ -219,6 +220,8 @@ class SPARZIP:
             (Only relevant for TIFF files. DAT files do not contain metadata.)
         create_single_file : bool, optional
             whether to package the video and NPZ files into a single MKV container, by default False
+        save_metadata_to_json : bool, optional
+            whether to save metadata to a separate JSON file, by default False (embeds in NPZ)
 
         """
         # self.codec = codec
@@ -258,6 +261,7 @@ class SPARZIP:
         self.peak_process = peaks_process
         self.extract_metadata_flag = extract_metadata
         self.create_single_file = create_single_file
+        self.save_metadata_to_json = save_metadata_to_json
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -1192,6 +1196,7 @@ class SPARZIP:
     def write_frames_to_video(self, bp1_block, video_name, writer_args, chunk_size=50):
         """
         Memory-optimized video encoding using streaming chunks instead of loading entire video into memory.
+        Enhanced with better error handling, validation, and moov atom fix.
         
         Args:
             bp1_block: Dask array of video frames
@@ -1199,15 +1204,35 @@ class SPARZIP:
             writer_args: FFmpeg encoder arguments
             chunk_size: Number of frames to process at once (default: 50)
         """
-        # Prepare output directories
-        os.makedirs(os.path.dirname(video_name), exist_ok=True)
-
+        import subprocess
+        
+        # Pre-flight checks and directory preparation
+        output_dir = os.path.dirname(video_name)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
+        # Validate input array
+        if bp1_block is None or bp1_block.shape[0] == 0:
+            raise ValueError(f"Input array is empty or None for {video_name}")
+        
         # Get frame dimensions
         H, W = bp1_block.shape[1], bp1_block.shape[2]
         T = bp1_block.shape[0]
         
-        # Create FFmpeg command for streaming input
-        import subprocess
+        # Detect if this is a Dask array
+        is_dask_array = hasattr(bp1_block, 'compute') and callable(getattr(bp1_block, 'compute'))
+        
+        # Validate data type by checking first frame
+        if is_dask_array:
+            sample_frame = bp1_block[0:1].compute()
+        else:
+            sample_frame = bp1_block[0:1]
+        
+        expected_dtype = np.uint16
+        if sample_frame.dtype != expected_dtype:
+            print(f"Warning: Expected dtype {expected_dtype}, got {sample_frame.dtype}. Converting...")
+        
+        # Build FFmpeg command with enhanced parameters
         cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'gray16le', 
                '-s', f'{W}x{H}', '-r', '25', '-i', 'pipe:0']
         
@@ -1216,42 +1241,171 @@ class SPARZIP:
             if key not in ['s']:  # Skip dimensions as already set
                 cmd.extend([f'-{key}', str(value)])
         
-        cmd.extend(['-loglevel', 'quiet', video_name])
+        # Add movflags for MP4 to ensure moov atom is written properly
+        if video_name.endswith('.mp4'):
+            cmd.extend(['-movflags', '+faststart'])
         
-        # Start FFmpeg process
-        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Use 'error' level for better diagnostics while still being relatively quiet
+        cmd.extend(['-loglevel', 'error', video_name])
         
+        # Start FFmpeg process with larger buffer
+        process = subprocess.Popen(cmd, 
+                                 stdin=subprocess.PIPE, 
+                                 stdout=subprocess.PIPE, 
+                                 stderr=subprocess.PIPE,
+                                 bufsize=10**8)  # 100MB buffer
+        
+        stdin_closed = False
         try:
-            # Handle both Dask arrays and NumPy arrays
-            import dask.array as da
-            is_dask_array = hasattr(bp1_block, 'compute') and callable(getattr(bp1_block, 'compute'))
-            
             # Stream frames in chunks to reduce memory usage
+            bytes_written = 0
             for i in range(0, T, chunk_size):
                 end_idx = min(i + chunk_size, T)
-                if is_dask_array:
-                    chunk = bp1_block[i:end_idx].compute()  # Dask array - compute chunks
-                else:
-                    chunk = bp1_block[i:end_idx]  # NumPy array - direct slice
-                process.stdin.write(chunk.tobytes())
-            
-            # Close stdin to signal end of input
-            process.stdin.close()
-            
-            # Wait for FFmpeg to finish
-            stdout, stderr = process.communicate()
-            
-            if process.returncode != 0:
-                print(f"FFmpeg error encoding {video_name}: {stderr.decode()}")
                 
+                # Get chunk of frames
+                if is_dask_array:
+                    chunk = bp1_block[i:end_idx].compute()
+                else:
+                    chunk = bp1_block[i:end_idx]
+                
+                # Ensure correct dtype
+                if chunk.dtype != expected_dtype:
+                    chunk = chunk.astype(expected_dtype)
+                
+                # Write to FFmpeg stdin
+                chunk_bytes = chunk.tobytes()
+                try:
+                    process.stdin.write(chunk_bytes)
+                    process.stdin.flush()  # Explicit flush after each chunk
+                    bytes_written += len(chunk_bytes)
+                except BrokenPipeError:
+                    # FFmpeg closed the pipe - get error message
+                    stdin_closed = True
+                    stdout, stderr = process.wait(timeout=2), process.stderr.read()
+                    error_msg = stderr.decode() if stderr else "No error message"
+                    raise RuntimeError(f"FFmpeg closed input pipe early: {error_msg}")
+                
+                # Progress indicator for large files
+                if (i + chunk_size) % 500 == 0:
+                    print(f"  Encoded {min(i + chunk_size, T)}/{T} frames...")
+            
+            # Close stdin to signal end of input (if not already closed)
+            if not stdin_closed:
+                process.stdin.close()
+                stdin_closed = True
+            
+            # Wait for FFmpeg to finish with timeout
+            return_code = process.wait(timeout=60)
+            
+            # Read any remaining output
+            stdout_data = process.stdout.read() if process.stdout else b''
+            stderr_data = process.stderr.read() if process.stderr else b''
+            
+            # Check return code
+            if return_code != 0:
+                error_msg = stderr_data.decode() if stderr_data else "No error message from FFmpeg"
+                raise RuntimeError(f"FFmpeg failed with return code {return_code} for {video_name}. Error: {error_msg}")
+            
+            # Validate output file exists and has reasonable size
+            if not os.path.exists(video_name):
+                raise FileNotFoundError(f"FFmpeg completed but output file not found: {video_name}")
+            
+            file_size = os.path.getsize(video_name)
+            if file_size < 1000:  # Less than 1KB is suspiciously small
+                raise ValueError(f"Output file is suspiciously small ({file_size} bytes): {video_name}")
+            
+            # Success message
+            print(f"  Successfully encoded {T} frames ({bytes_written / (1024*1024):.1f} MB) to {os.path.basename(video_name)}")
+            
+        except subprocess.TimeoutExpired:
+            # Timeout waiting for process
+            process.kill()
+            process.wait(timeout=5)  # Give it time to die
+            raise TimeoutError(f"FFmpeg timed out encoding {video_name}")
+            
         except Exception as e:
-            print(f"Error during streaming video encoding: {e}")
-            if process.stdin and not process.stdin.closed:
-                process.stdin.close()
-            process.terminate()
+            # For any other exception, ensure process is terminated
+            if process.poll() is None:  # Process is still running
+                try:
+                    if not stdin_closed and process.stdin:
+                        try:
+                            process.stdin.close()
+                        except:
+                            pass  # Ignore errors closing stdin
+                    process.terminate()  # Try graceful termination first
+                    process.wait(timeout=2)
+                except:
+                    process.kill()  # Force kill if terminate doesn't work
+                    try:
+                        process.wait(timeout=5)
+                    except:
+                        pass  # Process might be stuck
+            
+            # Re-raise the original exception with context
+            if "FFmpeg" not in str(e):
+                raise RuntimeError(f"Video encoding failed for {video_name}: {str(e)}") from e
+            else:
+                raise  # Re-raise if it's already an FFmpeg error
         finally:
-            if process.stdin and not process.stdin.closed:
-                process.stdin.close()
+            # Ensure all pipes are closed
+            if process.stdin and not stdin_closed:
+                try:
+                    process.stdin.close()
+                except:
+                    pass
+            if process.stdout:
+                try:
+                    process.stdout.close()
+                except:
+                    pass
+            if process.stderr:
+                try:
+                    process.stderr.close()
+                except:
+                    pass
+
+    def validate_video_file(self, video_path):
+        """
+        Validate that a video file is properly formatted and readable.
+        
+        Args:
+            video_path: Path to the video file to validate
+            
+        Returns:
+            bool: True if valid, raises exception if invalid
+        """
+        import subprocess
+        
+        if not os.path.exists(video_path):
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        
+        # Check file size
+        file_size = os.path.getsize(video_path)
+        if file_size < 1000:
+            raise ValueError(f"Video file is too small ({file_size} bytes): {video_path}")
+        
+        # Use ffprobe to validate the video structure
+        cmd = ['ffprobe', '-v', 'error', '-show_format', '-show_streams', video_path]
+        
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            
+            if result.returncode != 0:
+                raise ValueError(f"Video file appears corrupted. FFprobe error: {result.stderr}")
+            
+            # Check for moov atom in MP4 files
+            if video_path.endswith('.mp4'):
+                # Look for format information in the output
+                if 'format' not in result.stdout.lower():
+                    raise ValueError(f"MP4 file missing format information (possibly missing moov atom): {video_path}")
+            
+            return True
+            
+        except subprocess.TimeoutExpired:
+            raise TimeoutError(f"Video validation timed out for: {video_path}")
+        except FileNotFoundError:
+            print("Warning: ffprobe not found. Skipping detailed video validation.")
+            return True  # Assume valid if we can't validate
 
     def zstd_compress(self, compression_level, effect_size, power, compute_dict):
         # Perform power analysis to find sample size
@@ -1413,10 +1567,9 @@ class SPARZIP:
         
         return significant_variation
 
-    def save_npz_with_metadata(self, filepath, sparse_matrix, metadata_entry):
+    def save_npz_with_metadata(self, filepath, sparse_matrix, metadata_entry=None):
         """
-        Save sparse matrix with associated metadata to NPZ file.
-        Based on the original save_sparse_with_metadata design from commit 45e86e9.
+        Save sparse matrix to NPZ file. Embeds metadata if not saving to JSON.
         """
         try:
             # Convert sparse matrix to COO format and compute if needed (from original design)
@@ -1428,39 +1581,63 @@ class SPARZIP:
             # Ensure it's in COO format
             if hasattr(sparse_data, 'tocoo') and not isinstance(sparse_data, sparse.COO):
                 sparse_data = sparse_data.tocoo()
-            
-            # Serialize the metadata entry
-            if metadata_entry:
-                serialized_metadata = serialize_metadata([metadata_entry])[0]  # Get single entry
-            else:
-                serialized_metadata = {}
-            
-            # Prepare data dictionary (following original structure but with improved metadata)
+
             data_to_save = {
                 'data': sparse_data.data,
                 'coords': sparse_data.coords,
                 'shape': sparse_data.shape,
-                'metadata': json.dumps(serialized_metadata, ensure_ascii=False)  # Use 'metadata' key like original
             }
+
+            # Embed metadata only if the flag is not set and metadata exists
+            if metadata_entry and not self.save_metadata_to_json:
+                serialized_metadata = serialize_metadata([metadata_entry])[0]
+                data_to_save['metadata'] = json.dumps(serialized_metadata, ensure_ascii=False)
             
-            # Save using numpy's compressed format (following original approach)
+            # Save using numpy's compressed format
             np.savez_compressed(filepath, **data_to_save)
             
         except Exception as e:
-            print(f'Error saving NPZ with metadata to {filepath}: {e}')
+            print(f'Error saving NPZ to {filepath}: {e}')
             # Fallback to standard sparse save
             sparse.save_npz(filepath, sparse_matrix)
     
     def save_metadata(self):
         """
-        Save extracted metadata to JSON files for later restoration.
-        NOTE: This is now integrated into NPZ saving process.
+        Save extracted metadata to JSON files for later restoration if requested.
         Only saves metadata if extract_metadata=True was set during initialization.
         """
-        if self.extract_metadata_flag:
-            print('Extracting and saving metadata...')
-        else:
+        if not self.extract_metadata_flag:
             print('Metadata extraction was disabled - no metadata to save.')
+            return
+
+        if not self.save_metadata_to_json:
+            # This is now the default behavior, metadata is embedded in NPZ
+            return
+
+        print('Saving metadata to separate JSON files...')
+        
+        # Serialize metadata
+        serialized_bp1 = serialize_metadata(self.metadata_bp1)
+        
+        # Save BP1 metadata
+        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
+        try:
+            with open(metadata_file_bp1, 'w') as f:
+                json.dump(serialized_bp1, f, indent=4)
+            print(f'Saved BP1 metadata to: {metadata_file_bp1}')
+        except Exception as e:
+            print(f'Error saving BP1 metadata to {metadata_file_bp1}: {e}')
+            
+        # Save BP2 metadata if it exists
+        if self.metadata_bp2:
+            serialized_bp2 = serialize_metadata(self.metadata_bp2)
+            metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+            try:
+                with open(metadata_file_bp2, 'w') as f:
+                    json.dump(serialized_bp2, f, indent=4)
+                print(f'Saved BP2 metadata to: {metadata_file_bp2}')
+            except Exception as e:
+                print(f'Error saving BP2 metadata to {metadata_file_bp2}: {e}')
 
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if codec!='zstd' and compute_zstd_dict:
@@ -1518,8 +1695,14 @@ class SPARZIP:
             mkv_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.mkv'
             
             if os.path.exists(video_name1):
-                video_files.append(video_name1)
-                mkv_files_to_create.append(mkv_name1)
+                # Validate video file before adding to list
+                try:
+                    self.validate_video_file(video_name1)
+                    video_files.append(video_name1)
+                    mkv_files_to_create.append(mkv_name1)
+                except Exception as e:
+                    print(f"Warning: Skipping invalid video file {video_name1}: {e}")
+                    continue
             
             # Handle BP2 if not single plane
             if not self.single_plane:
@@ -1528,8 +1711,14 @@ class SPARZIP:
                 mkv_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.mkv'
                 
                 if os.path.exists(video_name2):
-                    video_files.append(video_name2)
-                    mkv_files_to_create.append(mkv_name2)
+                    # Validate video file before adding to list
+                    try:
+                        self.validate_video_file(video_name2)
+                        video_files.append(video_name2)
+                        mkv_files_to_create.append(mkv_name2)
+                    except Exception as e:
+                        print(f"Warning: Skipping invalid video file {video_name2}: {e}")
+                        continue
         
         if not video_files:
             print('Warning: No video files found. Skipping MKV packaging.')
@@ -1544,15 +1733,21 @@ class SPARZIP:
             return
         
         # Create MKV files for each video file
-        try:
-            for video_file, mkv_file in zip(video_files, mkv_files_to_create):
+        import subprocess
+        successful_count = 0
+        failed_count = 0
+        
+        for video_file, mkv_file in zip(video_files, mkv_files_to_create):
+            try:
+                print(f'  Creating MKV: {os.path.basename(mkv_file)}...')
+                
                 # Build ffmpeg command manually for better control over attachments
                 cmd = [
                     'ffmpeg', '-y',  # Overwrite output
                     '-i', video_file,  # Input video
                 ]
                 
-                # Add NPZ files as inputs
+                # Add NPZ files as attachments
                 for i, npz_file in enumerate(npz_files):
                     cmd.extend(['-attach', npz_file])
                     # Add metadata for each attachment
@@ -1563,26 +1758,63 @@ class SPARZIP:
                 cmd.extend([
                     '-c', 'copy',  # Copy streams without re-encoding
                     '-map', '0:0',  # Map video stream from first input
+                    '-loglevel', 'error',  # Show only errors
                     mkv_file  # Output file
                 ])
                 
-                # Run the command using subprocess instead of ffmpeg-python for attachments
-                import subprocess
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                # Run the command with timeout
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 
                 if result.returncode != 0:
-                    print(f'FFmpeg command failed: {" ".join(cmd)}')
-                    print(f'Error: {result.stderr}')
+                    print(f'  ERROR: FFmpeg failed creating {os.path.basename(mkv_file)}')
+                    print(f'  FFmpeg error: {result.stderr}')
+                    failed_count += 1
+                    
+                    # Additional diagnostic for common errors
+                    if 'moov atom not found' in result.stderr:
+                        print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} is corrupted (missing moov atom)')
+                    elif 'Invalid data found' in result.stderr:
+                        print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} contains invalid data')
+                    
                     continue
                 
-                video_basename = os.path.basename(video_file)
-                mkv_basename = os.path.basename(mkv_file)
-                print(f'Successfully created MKV package: {mkv_basename}')
-                print(f'Video: {video_basename}')
-                print(f'NPZ files: {len(npz_files)} files attached')
-            
-        except Exception as e:
-            print(f'Unexpected error during MKV packaging: {e}')
+                # Verify the output MKV file was created successfully
+                if not os.path.exists(mkv_file):
+                    print(f'  ERROR: MKV file was not created: {mkv_file}')
+                    failed_count += 1
+                    continue
+                
+                mkv_size = os.path.getsize(mkv_file)
+                video_size = os.path.getsize(video_file)
+                
+                # MKV should be at least as large as the video (plus attachments)
+                if mkv_size < video_size:
+                    print(f'  WARNING: MKV file seems too small ({mkv_size} bytes vs video {video_size} bytes)')
+                
+                successful_count += 1
+                print(f'  SUCCESS: Created {os.path.basename(mkv_file)} ({mkv_size / (1024*1024):.1f} MB)')
+                print(f'    - Video: {os.path.basename(video_file)}')
+                print(f'    - Attachments: {len(npz_files)} NPZ files')
+                
+            except subprocess.TimeoutExpired:
+                print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
+                failed_count += 1
+                continue
+                
+            except Exception as e:
+                print(f'  ERROR: Unexpected error creating MKV for {os.path.basename(video_file)}: {e}')
+                failed_count += 1
+                continue
+        
+        # Summary
+        print(f'\nMKV Packaging Summary:')
+        print(f'  Successful: {successful_count}')
+        print(f'  Failed: {failed_count}')
+        
+        if failed_count > 0:
+            print(f'\nWARNING: {failed_count} MKV file(s) could not be created.')
+            print('  Check the error messages above for details.')
+            print('  The original video and NPZ files are still available.')
 
 
 class SPARUNZIP:
@@ -1808,68 +2040,69 @@ class SPARUNZIP:
 
     def load_original_metadata(self):
         """
-        Load original TIFF metadata from NPZ files saved during compression.
+        Load original TIFF metadata from JSON files or embedded in NPZ files.
         """
         print('Loading metadata...')
         
-        # Load BP1 metadata from sparse NPZ files
+        # --- Try loading from JSON files first ---
+        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
+        metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+
+        metadata_bp1 = None
+        metadata_bp2 = None
+
+        if os.path.exists(metadata_file_bp1):
+            try:
+                with open(metadata_file_bp1, 'r') as f:
+                    metadata_bp1 = json.load(f)
+                print(f'Loaded metadata for BP1 from: {metadata_file_bp1}')
+                if os.path.exists(metadata_file_bp2):
+                    with open(metadata_file_bp2, 'r') as f:
+                        metadata_bp2 = json.load(f)
+                    print(f'Loaded metadata for BP2 from: {metadata_file_bp2}')
+                return metadata_bp1, metadata_bp2
+            except Exception as e:
+                print(f'Error loading metadata from JSON file: {e}. Falling back to other methods.')
+
+        # --- If JSON not found, try loading from NPZ files ---
+        print('No JSON metadata found. Trying to load from NPZ files...')
         metadata_bp1 = []
         try:
-            # For MKV files, use path_sparse_bp1; otherwise use output_path
             if hasattr(self, 'path_sparse_bp1') and self.path_sparse_bp1:
                 bp1_pattern = self.path_sparse_bp1
             else:
                 bp1_pattern = os.path.join(self.output_path, '*.npz')
             bp1_files = sorted(glob.glob(bp1_pattern))
             
-            # print(f'DEBUG: Looking for NPZ files in: {self.output_path}')
-            # print(f'DEBUG: Found {len(bp1_files)} NPZ files')
-            
             for npz_file in bp1_files:
-                # Skip BP2 files (we'll handle them separately)
                 if '_bp2_' in npz_file or npz_file.endswith('_bp2.npz'):
                     continue
-                    
                 metadata_entry = self.load_metadata_from_npz(npz_file)
                 if metadata_entry:
                     metadata_bp1.append(metadata_entry)
-                    
+            
             if metadata_bp1:
                 print(f'Loaded BP1 metadata from {len(metadata_bp1)} NPZ files')
-            else:
-                print('No BP1 metadata found in NPZ files, using encoded file metadata')
-                metadata_bp1, _ = self.extract_encoded_metadata()
-                
-        except Exception as e:
-            print(f'Error loading BP1 metadata from NPZ: {e}')
-            metadata_bp1, _ = self.extract_encoded_metadata()
-        
-        # Load BP2 metadata if BP2 exists
-        metadata_bp2 = None
-        if self.path_encoded_bp2:  # Only if BP2 exists
-            try:
+            
+            # BP2 logic
+            if self.path_encoded_bp2:
+                metadata_bp2 = []
                 bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
-                
-                if bp2_files:
-                    metadata_bp2 = []
-                    for npz_file in sorted(bp2_files):
-                        metadata_entry = self.load_metadata_from_npz(npz_file)
-                        if metadata_entry:
-                            metadata_bp2.append(metadata_entry)
-                            
-                    if metadata_bp2:
-                        print(f'Loaded BP2 metadata from {len(metadata_bp2)} NPZ files')
-                    else:
-                        print('No BP2 metadata found in NPZ files, using encoded file metadata')
-                        _, metadata_bp2 = self.extract_encoded_metadata()
-                else:
-                    print('No BP2 NPZ files found, using encoded file metadata') 
-                    _, metadata_bp2 = self.extract_encoded_metadata()
-                    
-            except Exception as e:
-                print(f'Error loading BP2 metadata from NPZ: {e}')
-                _, metadata_bp2 = self.extract_encoded_metadata()
-        
+                for npz_file in sorted(bp2_files):
+                    metadata_entry = self.load_metadata_from_npz(npz_file)
+                    if metadata_entry:
+                        metadata_bp2.append(metadata_entry)
+                if metadata_bp2:
+                    print(f'Loaded BP2 metadata from {len(metadata_bp2)} NPZ files')
+
+        except Exception as e:
+            print(f'Error loading metadata from NPZ: {e}. Falling back to encoded metadata.')
+
+        # --- Fallback to basic encoded metadata ---
+        if not metadata_bp1:
+            print('No metadata found in JSON or NPZ files. Using basic encoded file metadata.')
+            return self.extract_encoded_metadata()
+
         return metadata_bp1, metadata_bp2
 
     def extract_encoded_metadata(self):
@@ -1907,16 +2140,16 @@ class SPARUNZIP:
         description = None
         extratags = []
         
-        # For the first frame or encoded files, use global metadata
-        if frame_index is None or frame_index == 0 or metadata.get('is_encoded'):
-            # First priority: OME-XML from original metadata (even if marked as encoded)
+        # For the first frame, use global metadata
+        if frame_index is None or frame_index == 0:
+            # First priority: OME-XML from original metadata (regardless of is_encoded flag)
             if metadata.get('is_ome') and 'ome_xml' in metadata:
                 description = metadata['ome_xml']
                 extratags.append((305, 's', 0, "SPARUNZIP with OME-XML", True))
                 return description, extratags
             
             # Second priority: For encoded files without OME-XML, add basic info
-            if metadata.get('is_encoded'):
+            if metadata.get('is_encoded') and not metadata.get('is_ome'):
                 description = f"Reconstructed from {metadata['source_file']} | Processed by SPARUNZIP"
                 extratags.append((305, 's', 0, "SPARUNZIP", True))
             else:
@@ -2094,6 +2327,55 @@ class SPARUNZIP:
         
         print(f"Completed TIFF writing: {filename}")
 
+    def fix_ome_xml_for_output(self, ome_xml, filename, num_frames):
+        """
+        Update OME-XML metadata for the output file.
+        Updates filename references and UUID to match the new file.
+        """
+        import re
+        import uuid
+        import os
+        
+        if not ome_xml:
+            return None
+        
+        # Generate new UUID for this file
+        new_uuid = str(uuid.uuid4())
+        
+        # Get the base filename without path
+        base_filename = os.path.basename(filename)
+        
+        # Update the Image Name attribute
+        ome_xml = re.sub(
+            r'Name="[^"]*"',
+            f'Name="{base_filename}"',
+            ome_xml,
+            count=1  # Only replace first occurrence (the Image Name)
+        )
+        
+        # Update all FileName attributes in UUID tags
+        ome_xml = re.sub(
+            r'FileName="[^"]*"',
+            f'FileName="{base_filename}"',
+            ome_xml
+        )
+        
+        # Update all UUID values to the new UUID
+        ome_xml = re.sub(
+            r'urn:uuid:[a-f0-9\-]+',
+            f'urn:uuid:{new_uuid}',
+            ome_xml
+        )
+        
+        # Ensure we have the right number of TiffData elements
+        tiff_data_count = ome_xml.count('<TiffData')
+        if tiff_data_count != num_frames:
+            print(f"Warning: OME-XML has {tiff_data_count} TiffData elements but writing {num_frames} frames")
+            # If we have more TiffData than frames, that's OK (extra will be ignored)
+            # If we have fewer, we might need to generate more, but for now we'll use what we have
+        
+        return ome_xml
+
     def write_tiff_file(self, filename, all_frames, file_metadata, debug_prefix=""):
         """
         Helper method to write TIFF files with proper metadata handling.
@@ -2112,9 +2394,15 @@ class SPARUNZIP:
             # ALWAYS format metadata to get extratags
             description, extratags = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
             
-            # If OME-XML exists, it should be the description, but we keep the other tags
+            # If OME-XML exists, fix it for the output file
             if file_metadata.get('is_ome') and 'ome_xml' in file_metadata:
-                description = file_metadata['ome_xml']
+                original_ome = file_metadata['ome_xml']
+                # Fix the OME-XML for this specific output file
+                fixed_ome = self.fix_ome_xml_for_output(original_ome, filename, len(all_frames))
+                if fixed_ome:
+                    description = fixed_ome
+                else:
+                    description = original_ome
             
             # Now, write with description and extratags
             if resolution:
