@@ -229,11 +229,14 @@ class SPARZIP:
         if self.single_plane==False:
             self.path_image_files2 = sorted(glob.glob(path_image_files2))
         self.bp1, self.bp2 = self.load_images(path_image_files1, path_image_files2)
-        # if self.bp1.dtype == 'float32':
+        # Optimized dtype checking - check metadata first without computing arrays
         try:
-            if any(arr.dtype == np.float32 for arr in self.bp1):
+            # Check dtype from first array metadata (no computation needed)
+            first_array_dtype = self.bp1[0].dtype
+            if first_array_dtype == np.float32:
                 self.bp1, self.bp2 = self.to_16bit()
-        except TypeError:
+        except (AttributeError, TypeError):
+            # Fallback: compute only if metadata access fails
             dtype_first_array = self.bp1[0].compute().dtype
             if dtype_first_array == np.float32:
                 self.bp1, self.bp2 = self.to_16bit()
@@ -246,7 +249,8 @@ class SPARZIP:
         self.epsilon = epsilon
         self.kernel_size = kernel_size
         # self.compression_level = compression_level
-        self.batch_size = batch_size
+        # Dynamic batch sizing based on available memory
+        self.batch_size = self.get_optimal_batch_size(batch_size)
         self.stack_size = stack_size
         self.find_roi = find_peaks
         self.num_workers = num_workers
@@ -273,7 +277,61 @@ class SPARZIP:
         else:
             # Initialize empty metadata
             self.metadata_bp1, self.metadata_bp2 = [], []
+
+    def get_optimal_batch_size(self, base_batch_size):
+        """
+        Calculate optimal batch size based on available system memory.
         
+        Args:
+            base_batch_size: User-requested batch size
+            
+        Returns:
+            Optimized batch size that fits within memory constraints
+        """
+        try:
+            import psutil
+            
+            # Get available memory (in bytes)
+            available_memory = psutil.virtual_memory().available
+            
+            # Estimate memory per batch item based on typical image sizes
+            if hasattr(self, 'bp1') and self.bp1:
+                try:
+                    # Estimate based on first array if available
+                    first_array = self.bp1[0]
+                    if hasattr(first_array, 'nbytes'):
+                        estimated_item_size = first_array.nbytes
+                    elif hasattr(first_array, 'dtype') and hasattr(first_array, 'shape'):
+                        estimated_item_size = first_array.dtype.itemsize * np.prod(first_array.shape)
+                    else:
+                        estimated_item_size = 1024 * 1024  # 1MB fallback
+                except:
+                    estimated_item_size = 1024 * 1024  # 1MB fallback
+            else:
+                estimated_item_size = 1024 * 1024  # 1MB fallback for typical microscopy image
+            
+            # Use at most 10% of available memory for batch processing
+            max_memory_for_batch = available_memory * 0.1
+            
+            # Calculate optimal batch size
+            optimal_size = int(max_memory_for_batch / estimated_item_size)
+            
+            # Ensure minimum batch size of 1 and don't exceed user's request
+            optimal_size = max(1, min(optimal_size, base_batch_size))
+            
+            if optimal_size < base_batch_size:
+                print(f"Reducing batch size from {base_batch_size} to {optimal_size} due to memory constraints")
+            
+            return optimal_size
+            
+        except ImportError:
+            print("psutil not available, using default batch size")
+            return base_batch_size
+        except Exception as e:
+            print(f"Error calculating optimal batch size: {e}, using default")
+            return base_batch_size
+        
+    def load_images(self, path_image_files1, path_image_files2=None, multipage=False):
         if self.peak_process not in [None, 'median']:
             raise ValueError('Peaks process must be either None or median.')
 
@@ -318,6 +376,8 @@ class SPARZIP:
                 raw_data = np.memmap(dat_file, dtype='uint16')
                 img_nums = len(raw_data) // (dimX * dimY)
                 p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16').rechunk((1, dimY, dimX)))
+                # Explicit cleanup of memory mapping to prevent memory leaks
+                del raw_data
         else:
             raise ValueError(f'Unsupported file extension: {ext}.Supported extensions are .tiff, .tif and SRX .dat')
         if self.single_plane:
@@ -349,6 +409,8 @@ class SPARZIP:
                 raw_data = np.memmap(dat_file, dtype='uint16')
                 img_nums = len(raw_data) // (dimX * dimY)
                 p2.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
+                # Explicit cleanup of memory mapping to prevent memory leaks
+                del raw_data
         else:
             raise ValueError(f'Unsupported file extension: {ext}')
         return p1, p2
@@ -1127,31 +1189,69 @@ class SPARZIP:
         # Save metadata for lossless restoration
         self.save_metadata()
 
-    def write_frames_to_video(self, bp1_block, video_name, writer_args):
-        # Convert Dask array slices to NumPy arrays
-        bp1_frames = bp1_block
-        # bp2_frames = bp2_block if bp2_block is not None else None
-
+    def write_frames_to_video(self, bp1_block, video_name, writer_args, chunk_size=50):
+        """
+        Memory-optimized video encoding using streaming chunks instead of loading entire video into memory.
+        
+        Args:
+            bp1_block: Dask array of video frames
+            video_name: Output video file path
+            writer_args: FFmpeg encoder arguments
+            chunk_size: Number of frames to process at once (default: 50)
+        """
         # Prepare output directories
         os.makedirs(os.path.dirname(video_name), exist_ok=True)
 
-        input_dict = {
-            'format': 'rawvideo',
-            'pix_fmt': 'gray16le',
-            's': f'{bp1_frames.shape[2]}x{bp1_frames.shape[1]}',
-            'y': None,
-            # 's': '{}x{}'.format(*input_frames.shape[1:3][[::-1]])
-        }
-
-        ffmpeg_input = ffmpeg.input('pipe:', **input_dict)
-        # Create a ffmpeg output with the writer arguments
-        writer_args['s'] = input_dict['s']
-        # with open(os.devnull, "w") as devnull:
-        ffmpeg_output = ffmpeg.output(ffmpeg_input, video_name, loglevel="quiet", **writer_args)
-
-        # Run the ffmpeg command
-        # ffmpeg.run(ffmpeg_output, input=input_frames.tobytes())
-        ffmpeg.run(ffmpeg_output, input=bp1_frames.tobytes(), capture_stdout=True, capture_stderr=False)
+        # Get frame dimensions
+        H, W = bp1_block.shape[1], bp1_block.shape[2]
+        T = bp1_block.shape[0]
+        
+        # Create FFmpeg command for streaming input
+        import subprocess
+        cmd = ['ffmpeg', '-y', '-f', 'rawvideo', '-pix_fmt', 'gray16le', 
+               '-s', f'{W}x{H}', '-r', '25', '-i', 'pipe:0']
+        
+        # Add encoder arguments
+        for key, value in writer_args.items():
+            if key not in ['s']:  # Skip dimensions as already set
+                cmd.extend([f'-{key}', str(value)])
+        
+        cmd.extend(['-loglevel', 'quiet', video_name])
+        
+        # Start FFmpeg process
+        process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        
+        try:
+            # Handle both Dask arrays and NumPy arrays
+            import dask.array as da
+            is_dask_array = hasattr(bp1_block, 'compute') and callable(getattr(bp1_block, 'compute'))
+            
+            # Stream frames in chunks to reduce memory usage
+            for i in range(0, T, chunk_size):
+                end_idx = min(i + chunk_size, T)
+                if is_dask_array:
+                    chunk = bp1_block[i:end_idx].compute()  # Dask array - compute chunks
+                else:
+                    chunk = bp1_block[i:end_idx]  # NumPy array - direct slice
+                process.stdin.write(chunk.tobytes())
+            
+            # Close stdin to signal end of input
+            process.stdin.close()
+            
+            # Wait for FFmpeg to finish
+            stdout, stderr = process.communicate()
+            
+            if process.returncode != 0:
+                print(f"FFmpeg error encoding {video_name}: {stderr.decode()}")
+                
+        except Exception as e:
+            print(f"Error during streaming video encoding: {e}")
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
+            process.terminate()
+        finally:
+            if process.stdin and not process.stdin.closed:
+                process.stdin.close()
 
     def zstd_compress(self, compression_level, effect_size, power, compute_dict):
         # Perform power analysis to find sample size
