@@ -2367,7 +2367,8 @@ class SPARUNZIP:
                             tag_code = int(tag_name[4:])
                             
                             # Skip basic TIFF tags that are handled automatically
-                            if tag_code in [256, 257, 258, 259, 262, 273, 277, 278, 279, 282, 283, 296]:
+                            # Including 270 (ImageDescription) which must use description parameter
+                            if tag_code in [256, 257, 258, 259, 262, 270, 273, 277, 278, 279, 282, 283, 296]:
                                 continue
                             
                             # Determine the tag type and format extratag
