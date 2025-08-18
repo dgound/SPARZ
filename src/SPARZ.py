@@ -57,11 +57,18 @@ def serialize_metadata_value(value: Any) -> Any:
     elif isinstance(value, np.bool_):
         return bool(value)
     elif isinstance(value, np.ndarray):
-        # Convert small arrays to lists, skip large ones
-        if value.size <= 100:  # Arbitrary limit for reasonable metadata
-            return value.tolist()
-        else:
-            return f"<numpy_array_shape_{value.shape}_dtype_{value.dtype}>"
+        # Special handling for LUTs and other important arrays
+        # LUTs are typically (3, 256) for RGB lookup tables or similar structures
+        # We should preserve these as they're important for image processing
+        
+        # Always convert arrays to lists for JSON serialization
+        # Store with metadata about the original type
+        return {
+            '__numpy_array__': True,
+            'shape': value.shape,
+            'dtype': str(value.dtype),
+            'data': value.tolist()
+        }
     
     # Handle lists and tuples
     elif isinstance(value, (list, tuple)):
@@ -89,8 +96,12 @@ def serialize_metadata_value(value: Any) -> Any:
             # Try to decode as UTF-8 string
             return value.decode('utf-8')
         except UnicodeDecodeError:
-            # If not UTF-8, represent as base64 or skip
-            return f"<bytes_length_{len(value)}>"
+            # If not UTF-8, convert to base64 for preservation
+            import base64
+            return {
+                '__bytes__': True,
+                'data': base64.b64encode(value).decode('ascii')
+            }
     
     # Handle other types by converting to string representation
     else:
@@ -143,26 +154,59 @@ def restore_numeric_values(metadata: Dict) -> Dict:
     """
     Restore numeric values that may have been converted during JSON serialization.
     Call this before using metadata in format_metadata_for_tifffile().
+    Also restores numpy arrays and bytes that were serialized.
     """
     restored_metadata = {}
     
     for key, value in metadata.items():
         if isinstance(value, dict):
-            # Recursively restore nested dictionaries
-            restored_metadata[key] = restore_numeric_values(value)
+            # Check if it's a serialized numpy array
+            if value.get('__numpy_array__') == True:
+                # Restore the numpy array from the serialized format
+                import numpy as np
+                shape = tuple(value['shape'])
+                dtype = np.dtype(value['dtype'])
+                data = np.array(value['data'], dtype=dtype)
+                restored_metadata[key] = data.reshape(shape)
+            # Check if it's serialized bytes
+            elif value.get('__bytes__') == True:
+                # Restore bytes from base64
+                import base64
+                restored_metadata[key] = base64.b64decode(value['data'])
+            else:
+                # Recursively restore nested dictionaries
+                restored_metadata[key] = restore_numeric_values(value)
         elif isinstance(value, list):
             # Restore lists that might contain metadata
             restored_list = []
             for item in value:
                 if isinstance(item, dict):
-                    restored_list.append(restore_numeric_values(item))
+                    # Check if this dict is a serialized numpy array or bytes
+                    if item.get('__numpy_array__') == True:
+                        import numpy as np
+                        shape = tuple(item['shape'])
+                        dtype = np.dtype(item['dtype'])
+                        data = np.array(item['data'], dtype=dtype)
+                        restored_list.append(data.reshape(shape))
+                    elif item.get('__bytes__') == True:
+                        import base64
+                        restored_list.append(base64.b64decode(item['data']))
+                    else:
+                        restored_list.append(restore_numeric_values(item))
                 else:
                     restored_list.append(item)
             restored_metadata[key] = restored_list
         elif isinstance(value, str) and value.startswith('<') and value.endswith('>') and not value.startswith('<?xml'):
-            # Skip non-serializable placeholders, but preserve XML content (like OME-XML)
-            print(f'Skipping non-serializable metadata: {key} = {value}')
-            continue
+            # Handle old serialization format placeholders
+            # These are from NPZ files created before the serialization fix
+            # Silently skip them without printing warnings for known patterns
+            if 'numpy_array_shape' in value or 'bytes_length' in value:
+                # This is expected from old NPZ files, don't warn
+                continue
+            else:
+                # Only warn for unexpected placeholder formats
+                print(f'Skipping non-serializable metadata: {key} = {value}')
+                continue
         else:
             # Keep the value as-is
             restored_metadata[key] = value
