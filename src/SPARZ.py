@@ -968,7 +968,8 @@ class SPARZIP:
                                 elif isinstance(tag_value, int):
                                     extratags.append((tag_code, 'i', 1, tag_value, True))
                                 elif isinstance(tag_value, float):
-                                    extratags.append((tag_code, 'f', 1, tag_value, True))
+                                    # Convert float to string for Picasso compatibility
+                                    extratags.append((tag_code, 's', 0, str(tag_value), True))
                         except (ValueError, IndexError):
                             continue
         
@@ -2132,6 +2133,36 @@ class SPARUNZIP:
         metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
         metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
 
+        # If exact stem match not found, try auto-detection
+        if not os.path.exists(metadata_file_bp1):
+            print(f'Exact metadata file not found: {metadata_file_bp1}')
+            print('Attempting to auto-detect metadata files...')
+            
+            # Look for any *_metadata_bp1.json files in the output directory
+            pattern_bp1 = os.path.join(self.output_path, '*_metadata_bp1.json')
+            json_files_bp1 = glob.glob(pattern_bp1)
+            
+            if json_files_bp1:
+                if len(json_files_bp1) > 1:
+                    print(f'Warning: Multiple BP1 metadata files found: {json_files_bp1}')
+                    print(f'Using first match: {json_files_bp1[0]}')
+                metadata_file_bp1 = json_files_bp1[0]  # Use first match
+                print(f'Auto-detected BP1 metadata file: {metadata_file_bp1}')
+                
+                # Try to find corresponding BP2 file with same prefix
+                detected_stem = os.path.basename(metadata_file_bp1).replace('_metadata_bp1.json', '')
+                metadata_file_bp2 = os.path.join(self.output_path, f'{detected_stem}_metadata_bp2.json')
+                
+                if os.path.exists(metadata_file_bp2):
+                    print(f'Auto-detected BP2 metadata file: {metadata_file_bp2}')
+                else:
+                    # Also try pattern matching for BP2
+                    pattern_bp2 = os.path.join(self.output_path, '*_metadata_bp2.json')
+                    json_files_bp2 = glob.glob(pattern_bp2)
+                    if json_files_bp2:
+                        metadata_file_bp2 = json_files_bp2[0]
+                        print(f'Auto-detected BP2 metadata file: {metadata_file_bp2}')
+
         metadata_bp1 = None
         metadata_bp2 = None
 
@@ -2301,7 +2332,8 @@ class SPARUNZIP:
                                 elif isinstance(tag_value, int):
                                     extratags.append((tag_code, 'i', 1, tag_value, True))
                                 elif isinstance(tag_value, float):
-                                    extratags.append((tag_code, 'f', 1, tag_value, True))
+                                    # Convert float to string for Picasso compatibility
+                                    extratags.append((tag_code, 's', 0, str(tag_value), True))
                         except (ValueError, IndexError):
                             continue
         
@@ -2351,7 +2383,14 @@ class SPARUNZIP:
         # Get individual IFD metadata
         individual_ifds = file_metadata.get('individual_ifds', [])
         
-        with tifffile.TiffWriter(filename, bigtiff=True) as tif:
+        # Determine if BigTIFF is needed
+        estimated_size = all_frames.nbytes if hasattr(all_frames, 'nbytes') else 0
+        use_bigtiff = estimated_size > 4 * 1024 * 1024 * 1024  # 4GB threshold
+        
+        if use_bigtiff:
+            print(f"Writing BigTIFF with individual IFDs (file size > 4GB): {filename}")
+        
+        with tifffile.TiffWriter(filename, bigtiff=use_bigtiff) as tif:
             for frame_idx, frame_data in enumerate(all_frames):
                 # Prepare extratags for frame-specific metadata
                 frame_extratags = []
@@ -2372,10 +2411,14 @@ class SPARUNZIP:
                                 continue
                             
                             # Determine the tag type and format extratag
+                            # Note: Use only Picasso-compatible types (no floats)
                             if isinstance(tag_value, int):
+                                # Use 'I' for 32-bit unsigned int (TIFF type 4)
                                 frame_extratags.append((tag_code, 'I', 1, tag_value, True))
                             elif isinstance(tag_value, float):
-                                frame_extratags.append((tag_code, 'f', 1, tag_value, True))
+                                # Convert float to string for Picasso compatibility
+                                # (Picasso doesn't support TIFF type 11/12 for floats)
+                                frame_extratags.append((tag_code, 's', 0, str(tag_value), True))
                             elif isinstance(tag_value, str):
                                 frame_extratags.append((tag_code, 's', 0, tag_value, True))
                             elif isinstance(tag_value, (list, tuple)):
@@ -2384,7 +2427,9 @@ class SPARUNZIP:
                                     if isinstance(tag_value[0], int):
                                         frame_extratags.append((tag_code, 'I', len(tag_value), tag_value, True))
                                     elif isinstance(tag_value[0], float):
-                                        frame_extratags.append((tag_code, 'f', len(tag_value), tag_value, True))
+                                        # Convert float array to string for Picasso compatibility
+                                        str_value = ','.join(str(v) for v in tag_value)
+                                        frame_extratags.append((tag_code, 's', 0, str_value, True))
                 
                 # Write frame with its specific metadata
                 if frame_idx == 0:
@@ -2489,14 +2534,21 @@ class SPARUNZIP:
                 else:
                     description = original_ome
             
+            # Determine if BigTIFF is needed (>4GB uncompressed)
+            estimated_size = all_frames.nbytes if hasattr(all_frames, 'nbytes') else 0
+            use_bigtiff = estimated_size > 4 * 1024 * 1024 * 1024  # 4GB threshold
+            
+            if use_bigtiff:
+                print(f"Writing BigTIFF (file size > 4GB): {filename}")
+            
             # Now, write with description and extratags
             if resolution:
                 tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                               bigtiff=True, description=description, extratags=extratags,
+                               bigtiff=use_bigtiff, description=description, extratags=extratags,
                                resolution=resolution, resolutionunit=resolution_unit)
             else:
                 tifffile.imwrite(filename, all_frames, photometric='minisblack', 
-                               bigtiff=True, description=description, extratags=extratags)
+                               bigtiff=use_bigtiff, description=description, extratags=extratags)
                 # print(f"{debug_prefix}Fallback written to: {filename}")
 
     # def load_sparse(self, path_sparse_bp1:str, path_sparse_bp2:str):
