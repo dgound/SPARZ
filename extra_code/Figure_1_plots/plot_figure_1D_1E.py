@@ -22,12 +22,17 @@ color_palette = {
 order = ['SPARZ', 'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 
 
+
+path = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/'
+
+
+#%%
 ############################################################################################
 # ----------------------- NN distances ----------------------------------------------------#
 ############################################################################################
 
 
-nn_distances = pd.read_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__distances.csv')
+nn_distances = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__distances.csv')
 nn_distances['label'] = [x[0] for x in nn_distances['label'].str.split('_')]
 # replace 'sparz' with 'SPARZ'
 nn_distances['label'] = nn_distances['label'].replace('sparz', 'SPARZ')
@@ -61,17 +66,21 @@ plt.xlabel('')
 ############################################################################################
 # %%
 
-jaccard = pd.read_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__metrics.csv')
+jaccard = pd.read_csv(path + 'data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__metrics.csv')
 jaccard = jaccard[jaccard['metric'] == 'Jaccard']
 jaccard['label'] = [x[0] for x in jaccard['label'].str.split('_')]
 jaccard['label'] = jaccard['label'].replace('sparz', 'SPARZ')
-nn_distances['label'] = nn_distances['label'].replace('AV1', 'av1')
+jaccard['label'] = jaccard['label'].replace('AV1', 'av1')
 jaccard['color_palette'] = jaccard['label'].map(color_palette)
 
 #%%
 # boxplot the NN distances for each label and color it by the color palette column
-sns.stripplot(data=jaccard, x='label', y='value', palette=color_palette, size = 15, order = order)
+plt.figure(figsize=(6, 3))
+ax = sns.stripplot(data=jaccard, x='label', y='value', palette=color_palette, size = 15, order = order)
+plt.ylim(0, 1.09)
 plt.ylabel('Jaccard index')
+# move legend outside the plot and show label names
+# plt.legend(order, bbox_to_anchor=(1.05, 1), loc='upper left', title='Label')
 plt.xlabel('')
 
 # %%

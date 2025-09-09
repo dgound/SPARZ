@@ -32,8 +32,8 @@ def get_total_size_of_files(folder_path, file_extensions):
 
 #%% PATHS
 
-original_file = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/sequence-MT0.N1.HD-BP.tif'
-main_folder = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/'
+original_file = '/Users/alioutas/Dropbox/Dropbox (HMS)/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/sequence-MT0.N1.HD-BP.tif'
+main_folder = '/Users/alioutas/Dropbox/Dropbox (HMS)/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/'
 
 original_file_size = 41360118  # in bytes
 
@@ -57,7 +57,7 @@ for folder in sorted(os.listdir(main_folder), key=natural_sort_key):
 # Define color palette
 
 color_palette = {
-    # 'SPARZ': '#0E92EE',
+     'SPARZ': '#0E92EE',
     'h264': '#8ECAE6',
     'prores': '#219EBC',
     'av1': '#023047',
@@ -85,13 +85,14 @@ ssim_output.to_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_
 
 #%%
 # read ssim results
-ssim_output = pd.read_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv')
+ssim_output = pd.read_csv("/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv")
 
 
 
 #%%
 # Define the order of labels
-order = ['h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
+order = [#'SPARZ',
+    'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 # Create the stripplot
 sns.stripplot(data=ssim_output, x='file_size_percentage', y='median_ssim', hue='label', palette=color_palette, size=15, hue_order=order)
 plt.ylabel('Median SSIM Score')
@@ -100,10 +101,31 @@ plt.ylim(0.7, 1.009)
 plt.legend(title='Codec')
 
 # save plot  as png
-output_file = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/Figure1B_SSIM_filesize_20240529.pdf'
+output_file = '/Users/alioutas/Dropbox/HMS Dropbox/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/Figure1B_SSIM_filesize_20240529.pdf'
 plt.savefig(output_file, format='pdf')
 
 # Show the plot
 plt.show()
 
+# %%
+#Plotting only SSIM
+plt.figure(figsize=(6, 3))
+sns.stripplot(data=ssim_output, x='label', y='median_ssim', hue='label', palette=color_palette, size=15, order=order)
+plt.ylabel('Median SSIM Score')
+plt.xlabel(' ')
+plt.ylim(0, 1.09)
+plt.legend([],[],frameon=False)  # Disable legend
+# plt.legend(title='')  
+# move legend outside the plot
+# plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+# %%
+# Plotting only size
+plt.figure(figsize=(6, 3))
+sns.stripplot(data=ssim_output, x='label', y='file_size_percentage', hue='label', palette=color_palette, size=15, order=order)
+plt.ylabel('File Size (%)')
+plt.xlabel(' ')
+plt.ylim(0, 100)
+plt.legend([],[],frameon=False)  # Disable legend
+# move legend outside the plot
 # %%
