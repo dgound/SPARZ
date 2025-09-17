@@ -32,8 +32,9 @@ def get_total_size_of_files(folder_path, file_extensions):
 
 #%% PATHS
 
-original_file = '/Users/alioutas/Dropbox/Dropbox (HMS)/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/sequence-MT0.N1.HD-BP.tif'
-main_folder = '/Users/alioutas/Dropbox/Dropbox (HMS)/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/'
+original_file = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM//sequence-MT0.N1.HD-BP.tif'
+main_folder = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/'
+
 
 original_file_size = 41360118  # in bytes
 
@@ -56,13 +57,23 @@ for folder in sorted(os.listdir(main_folder), key=natural_sort_key):
 #%%
 # Define color palette
 
+# color_palette = {
+#      'SPARZ': '#0E92EE',
+#     'h264': '#8ECAE6',
+#     'prores': '#219EBC',
+#     'av1': '#023047',
+#     'x265': '#817425',
+#     'ffv1': '#FFB703',
+#     'zstd': '#FB8500'
+# }
+# New simplified color palette
 color_palette = {
-     'SPARZ': '#0E92EE',
-    'h264': '#8ECAE6',
-    'prores': '#219EBC',
-    'av1': '#023047',
+    'SPARZ': '#0E92EE',
+    'h264': '#817425',
+    'prores': '#817425',
+    'av1': '#817425',
     'x265': '#817425',
-    'ffv1': '#FFB703',
+    'ffv1': '#FB8500',
     'zstd': '#FB8500'
 }
 #%%
