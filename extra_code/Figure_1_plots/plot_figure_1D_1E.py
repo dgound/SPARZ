@@ -9,13 +9,24 @@ import seaborn as sns
 
 #%%
 # color pallete
+# color_palette = {
+#     'SPARZ': '#0E92EE',
+#     'h264': '#8ECAE6',
+#     'prores': '#219EBC',
+#     'av1': '#023047',
+#     'x265': '#817425',
+#     'ffv1': '#FFB703',
+#     'zstd': '#FB8500'
+# }
+
+# New simplified color palette
 color_palette = {
     'SPARZ': '#0E92EE',
-    'h264': '#8ECAE6',
-    'prores': '#219EBC',
-    'av1': '#023047',
+    'h264': '#817425',
+    'prores': '#817425',
+    'av1': '#817425',
     'x265': '#817425',
-    'ffv1': '#FFB703',
+    'ffv1': '#FB8500',
     'zstd': '#FB8500'
 }
 

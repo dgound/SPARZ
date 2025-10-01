@@ -1,4 +1,6 @@
 #%% IMPORTS
+from datetime import date
+from glob import glob
 import os
 import re
 import numpy as np
@@ -8,7 +10,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 
-# %% FUNCTIONS
+#%% FUNCTIONS
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
 
@@ -24,34 +26,58 @@ def calculate_ssim(original_file, compressed_file):
 
 def get_total_size_of_files(folder_path, file_extensions):
     total_size = 0
-    compressed_folder_path = os.path.join(folder_path, "compressed")
-    for file in os.listdir(compressed_folder_path):
+    for file in os.listdir(folder_path):
         if any(file.endswith(ext) for ext in file_extensions):
-            total_size += os.path.getsize(os.path.join(compressed_folder_path, file))
+            total_size += os.path.getsize(os.path.join(folder_path, file))
     return total_size
 
 #%% PATHS
 
-original_file = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM//sequence-MT0.N1.HD-BP.tif'
-main_folder = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/'
+# original_file = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM//sequence-MT0.N1.HD-BP.tif'
+original_files = glob('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/raw/*.tif')
+main_folder = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/'
 
 
-original_file_size = 41360118  # in bytes
+# original_file_size = 41360118  # in bytes
+# calcuate the total original file size of all original files
+original_file_size = sum(os.path.getsize(f) for f in original_files)
+
+folders_level_0 = sorted([f for f in os.listdir(main_folder) if f.endswith('level_0')], key=natural_sort_key)
 
 #%% CALCULATE SSIM AND FILE SIZE PERCENTAGE
 results = {}
-for folder in sorted(os.listdir(main_folder), key=natural_sort_key):
+for folder in folders_level_0:
     folder_path = os.path.join(main_folder, folder)
+    print(f"\nProcessing folder: {folder_path}")
     if os.path.isdir(folder_path):
-        compressed_file = os.path.join(folder_path, 'sequence-MT0.N1.HD-BP.tif')
-        median_ssim = calculate_ssim(original_file, compressed_file)
-        total_file_size = get_total_size_of_files(folder_path, ['.mp4', '.npz', '.avi', '.mov', '.zst'])
-        file_size_percentage = (total_file_size / original_file_size) * 100
-
-        results[folder] = {
-            'median_ssim': median_ssim,
-            'file_size_percentage': file_size_percentage
-        }
+        # Find all .tif or .tiff files in the compressed folder
+        compressed_files = sorted(
+            glob(os.path.join(folder_path, '*.tif')) + glob(os.path.join(folder_path, '*.tiff')),
+            key=natural_sort_key
+        )
+        print(f"Compressed files found: {[os.path.basename(f) for f in compressed_files]}")
+        ssim_scores = []
+        # Comparison between "-250"/"+250" matching biplanes:
+        orig_minus = next((f for f in original_files if "-250" in os.path.basename(f)), None)
+        orig_plus = next((f for f in original_files if "+250" in os.path.basename(f)), None)
+        comp_minus = next((f for f in compressed_files if "-250" in os.path.basename(f)), None)
+        comp_plus = next((f for f in compressed_files if "+250" in os.path.basename(f)), None)
+        if orig_minus and comp_minus:
+            print(f"Comparing {orig_minus} with {comp_minus}")
+            score_minus = calculate_ssim(orig_minus, comp_minus)
+            ssim_scores.append(score_minus)
+        if orig_plus and comp_plus:
+            print(f"Comparing {orig_plus} with {comp_plus}")
+            score_plus = calculate_ssim(orig_plus, comp_plus)
+            ssim_scores.append(score_plus)
+        if ssim_scores:
+            median_ssim = np.median(ssim_scores)
+            total_file_size = get_total_size_of_files(folder_path, ['.mp4', '.npz', '.avi', '.mov', '.zst'])
+            file_size_percentage = (total_file_size / original_file_size) * 100
+            results[folder] = {
+                'median_ssim': median_ssim,
+                'file_size_percentage': file_size_percentage
+            }
 
 
 #%%
@@ -69,6 +95,7 @@ for folder in sorted(os.listdir(main_folder), key=natural_sort_key):
 # New simplified color palette
 color_palette = {
     'SPARZ': '#0E92EE',
+    'sparzffv1': '#0E92EE',
     'h264': '#817425',
     'prores': '#817425',
     'av1': '#817425',
@@ -84,25 +111,29 @@ ssim_output.columns = ['label', 'median_ssim', 'file_size_percentage']
 # Extract label and map colors
 ssim_output['label'] = ssim_output['label'].str.split('_').str[0]
 ssim_output['label'] = ssim_output['label'].replace('AV1', 'av1')
+ssim_output['label'] = ssim_output['label'].replace('sparz', 'SPARZ')
 ssim_output['color_palette'] = ssim_output['label'].map(color_palette)
 
 # Round file size percentage
 ssim_output['file_size_percentage'] = np.round(ssim_output['file_size_percentage'], 2)
+# Ensure output directory exists before saving
+output_dir = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output'
+os.makedirs(output_dir, exist_ok=True)
 # save the datatable
-ssim_output.to_csv('/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv', index=False)
+ssim_output.to_csv(f'{output_dir}/SSIM_filesize_{date.today().strftime("%Y%m%d")}.csv', index=False)
 
 
 #%% PLOT
 
 #%%
 # read ssim results
-ssim_output = pd.read_csv("/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/SSIM_filesize_20240529.csv")
+ssim_output = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/SSIM_filesize_20251001.csv')
 
 
 
 #%%
 # Define the order of labels
-order = [#'SPARZ',
+order = ['SPARZ',
     'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
 # Create the stripplot
 sns.stripplot(data=ssim_output, x='file_size_percentage', y='median_ssim', hue='label', palette=color_palette, size=15, hue_order=order)
@@ -122,7 +153,7 @@ plt.show()
 #Plotting only SSIM
 plt.figure(figsize=(6, 3))
 sns.stripplot(data=ssim_output, x='label', y='median_ssim', hue='label', palette=color_palette, size=15, order=order)
-plt.ylabel('Median SSIM Score')
+plt.ylabel('Median SSIM Score', fontsize=12)
 plt.xlabel(' ')
 plt.ylim(0, 1.09)
 plt.legend([],[],frameon=False)  # Disable legend
@@ -134,7 +165,7 @@ plt.legend([],[],frameon=False)  # Disable legend
 # Plotting only size
 plt.figure(figsize=(6, 3))
 sns.stripplot(data=ssim_output, x='label', y='file_size_percentage', hue='label', palette=color_palette, size=15, order=order)
-plt.ylabel('File Size (%)')
+plt.ylabel('File Size (%)', fontsize=12)
 plt.xlabel(' ')
 plt.ylim(0, 100)
 plt.legend([],[],frameon=False)  # Disable legend
