@@ -22,6 +22,7 @@ import seaborn as sns
 # New simplified color palette
 color_palette = {
     'SPARZ': '#0E92EE',
+    'SPARZ lossless': '#0E92EE',
     'h264': '#817425',
     'prores': '#817425',
     'av1': '#817425',
@@ -30,7 +31,7 @@ color_palette = {
     'zstd': '#FB8500'
 }
 
-order = ['SPARZ', 'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
+order = ['SPARZ', 'h264', 'prores', 'av1', 'x265','SPARZ lossless' ,'ffv1', 'zstd']
 
 
 
@@ -61,6 +62,7 @@ sns.boxplot(data=nn_distances, x='label', y='distance', palette=color_palette, f
 # plt.ylim(nn_distances.distance.min(), nn_distances.distance.max())
 # some of the boxolots are invisible, so we need to increase by 10% the y axis
 plt.ylim(-2, 40)
+plt.axvline(x=4.5, ymin=0, ymax=1, color='black', lw=2)
 # plt.yscale('log')
 plt.ylabel('Distance (nm)')
 plt.xlabel('')
@@ -90,6 +92,7 @@ plt.figure(figsize=(6, 3))
 ax = sns.stripplot(data=jaccard, x='label', y='value', palette=color_palette, size = 15, order = order)
 plt.ylim(0, 1.09)
 plt.ylabel('Jaccard index')
+plt.axvline(x=4.5, ymin=0, ymax=1, color='black', lw=2)
 # move legend outside the plot and show label names
 # plt.legend(order, bbox_to_anchor=(1.05, 1), loc='upper left', title='Label')
 plt.xlabel('')

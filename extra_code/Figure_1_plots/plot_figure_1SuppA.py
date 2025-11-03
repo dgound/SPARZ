@@ -23,6 +23,7 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 # New simplified color palette
 color_palette = {
     'SPARZ': '#0E92EE',
+    'SPARZ lossless': '#0E92EE',
     'h264': '#817425',
     'prores': '#817425',
     'av1': '#817425',
@@ -31,7 +32,7 @@ color_palette = {
     'zstd': '#FB8500'
 }
 
-order = ['SPARZ', 'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
+order = ['SPARZ', 'h264', 'prores', 'av1', 'x265','SPARZ lossless' ,'ffv1', 'zstd']
 
 
 #%%

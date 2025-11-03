@@ -95,7 +95,7 @@ for folder in folders_level_0:
 # New simplified color palette
 color_palette = {
     'SPARZ': '#0E92EE',
-    'sparzffv1': '#0E92EE',
+    'SPARZ lossless': '#0E92EE',
     'h264': '#817425',
     'prores': '#817425',
     'av1': '#817425',
@@ -112,6 +112,7 @@ ssim_output.columns = ['label', 'median_ssim', 'file_size_percentage']
 ssim_output['label'] = ssim_output['label'].str.split('_').str[0]
 ssim_output['label'] = ssim_output['label'].replace('AV1', 'av1')
 ssim_output['label'] = ssim_output['label'].replace('sparz', 'SPARZ')
+ssim_output['label'] = ssim_output['label'].replace('sparzffv1', 'SPARZ lossless')
 ssim_output['color_palette'] = ssim_output['label'].map(color_palette)
 
 # Round file size percentage
@@ -133,17 +134,16 @@ ssim_output = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_com
 
 #%%
 # Define the order of labels
-order = ['SPARZ',
-    'h264', 'prores', 'av1', 'x265', 'ffv1', 'zstd']
+order = ['SPARZ', 'h264', 'prores', 'av1', 'x265','SPARZ lossless' ,'ffv1', 'zstd']
 # Create the stripplot
-sns.stripplot(data=ssim_output, x='file_size_percentage', y='median_ssim', hue='label', palette=color_palette, size=15, hue_order=order)
+sns.stripplot(data=ssim_output, x='file_size_percentage', y='median_ssim', hue='label', palette=color_palette, size=15, hue_order=order, dodge=True)
 plt.ylabel('Median SSIM Score')
 plt.xlabel('File Size (%)')
 plt.ylim(0.7, 1.009)
-plt.legend(title='Codec')
+plt.legend(title='Codec', loc='lower right')
 
 # save plot  as png
-output_file = '/Users/alioutas/Dropbox/HMS Dropbox/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/Figure1B_SSIM_filesize_20240529.pdf'
+output_file = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_for_SSIM/output/Figure1B_SSIM_filesize_20240529.pdf'
 plt.savefig(output_file, format='pdf')
 
 # Show the plot
@@ -151,23 +151,28 @@ plt.show()
 
 # %%
 #Plotting only SSIM
-plt.figure(figsize=(6, 3))
+plt.figure(figsize=(6, 2))
 sns.stripplot(data=ssim_output, x='label', y='median_ssim', hue='label', palette=color_palette, size=15, order=order)
 plt.ylabel('Median SSIM Score', fontsize=12)
 plt.xlabel(' ')
 plt.ylim(0, 1.09)
+plt.xticks(rotation=45)
 plt.legend([],[],frameon=False)  # Disable legend
+plt.axvline(x=4.5, ymin=0, ymax=1, color='black', lw=2)
 # plt.legend(title='')  
 # move legend outside the plot
 # plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 
 # %%
 # Plotting only size
-plt.figure(figsize=(6, 3))
+plt.figure(figsize=(6, 2))
 sns.stripplot(data=ssim_output, x='label', y='file_size_percentage', hue='label', palette=color_palette, size=15, order=order)
 plt.ylabel('File Size (%)', fontsize=12)
 plt.xlabel(' ')
+plt.xticks(rotation=45)
 plt.ylim(0, 100)
 plt.legend([],[],frameon=False)  # Disable legend
+plt.axvline(x=4.5, ymin=0, ymax=1, color='black', lw=2)
+
 # move legend outside the plot
 # %%
