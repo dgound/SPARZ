@@ -23,6 +23,8 @@ setup(
         'pims',
         'sparse',
         'av',
-        'jinja2'
+        'jinja2',
+        'zstandard',
+        'tqdm',
     ],
 )
