@@ -2081,7 +2081,7 @@ class SPARZIP:
             print('  The original video and NPZ files are still available.')
 
 
-class SPARUNZIP:
+class UNSPARZ:
     def __init__(self, path_sparse_bp1:str, 
                  path_encoded_bp1:str, 
                  stem:str, 
@@ -2467,7 +2467,7 @@ class SPARUNZIP:
         return metadata_bp1, metadata_bp2 if self.path_encoded_bp2 else None
 
     def format_metadata_for_tifffile(self, metadata, frame_index=None):
-        """Format extracted metadata for tifffile.TiffWriter - SPARUNZIP version"""
+        """Format extracted metadata for tifffile.TiffWriter - UNSPARZ version"""
         if not metadata or 'error' in metadata:
             return None, []
         
@@ -2479,13 +2479,13 @@ class SPARUNZIP:
             # First priority: OME-XML from original metadata (regardless of is_encoded flag)
             if metadata.get('is_ome') and 'ome_xml' in metadata:
                 description = metadata['ome_xml']
-                extratags.append((305, 's', 0, "SPARUNZIP with OME-XML", True))
+                extratags.append((305, 's', 0, "UNSPARZ with OME-XML", True))
                 return description, extratags
             
             # Second priority: For encoded files without OME-XML, add basic info
             if metadata.get('is_encoded') and not metadata.get('is_ome'):
-                description = f"Reconstructed from {metadata['source_file']} | Processed by SPARUNZIP"
-                extratags.append((305, 's', 0, "SPARUNZIP", True))
+                description = f"Reconstructed from {metadata['source_file']} | Processed by UNSPARZ"
+                extratags.append((305, 's', 0, "UNSPARZ", True))
             else:
                 # Same logic as SPARZIP for original TIFF files
                 description_parts = []
@@ -2516,7 +2516,7 @@ class SPARUNZIP:
                     # Add other important tags as extratags
                     for tag_name, tag_value in tags.items():
                         if tag_name == 'Software' and isinstance(tag_value, str):
-                            extratags.append((305, 's', 0, f"{tag_value} -> SPARUNZIP", True))  # Software tag
+                            extratags.append((305, 's', 0, f"{tag_value} -> UNSPARZ", True))  # Software tag
                         elif tag_name == 'DateTime' and isinstance(tag_value, str):
                             extratags.append((306, 's', 0, tag_value, True))  # DateTime tag
                         elif tag_name not in ['ImageDescription', 'Software', 'DateTime'] and isinstance(tag_value, (str, int, float)):
@@ -2528,7 +2528,7 @@ class SPARUNZIP:
                 
                 # Add default software tag if not present
                 if not any(tag[0] == 305 for tag in extratags):
-                    extratags.append((305, 's', 0, "SPARUNZIP", True))
+                    extratags.append((305, 's', 0, "UNSPARZ", True))
         
         else:
             # For subsequent frames, use individual IFD metadata if available
