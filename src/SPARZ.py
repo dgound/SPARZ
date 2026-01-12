@@ -11,7 +11,6 @@ from scipy.ndimage import shift
 import dask.array as da
 import dask_image.imread
 from dask import delayed
-from reader import imread as vimread
 import dask
 from dask import compute
 import gc
@@ -2992,24 +2991,6 @@ class UNSPARZ:
     #         bp1 = list(executor.map(lambda file: self.load_mp4(file), files_bp1))
     #         bp2 = list(executor.map(lambda file: self.load_mp4(file), files_bp2))
     #     return bp1, bp2
-
-    def decode_fallback(self, path_bp1:str, path_bp2:str):
-        print('Decoding images...')
-        files_bp1 = sorted(glob.glob(path_bp1))
-        if path_bp2 is not None:
-            files_bp2 = sorted(glob.glob(path_bp2))
-            # self.encoded_bp2_files = files_bp2
-            assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
-            bp1, bp2 = [], []
-            for i in range(len(files_bp1)):
-                bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-                bp2.append(vimread(files_bp2[i], dtypes='uint16'))
-            return bp1, bp2
-        bp1 = []
-        for i in range(len(files_bp1)):
-            bp1.append(vimread(files_bp1[i], dtypes='uint16'))
-        return bp1, None
-        # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
 
     def _unshuffle_bytes(self, data: bytes, itemsize: int = 2) -> bytes:
         """Reverse the byte shuffle operation."""
