@@ -13,7 +13,7 @@ setup(
     url='https://github.com/your_username/your_package',
     package_dir={'': 'src'},
     packages=find_packages(where='src'),
-    py_modules=['SPARZ', 'cli'],
+    py_modules=['SPARZ', 'cli', 'gui'],
     install_requires=[
         'numpy',
         'scikit-image',
@@ -34,6 +34,10 @@ setup(
         'console_scripts': [
             'sparz=cli:main_compress',
             'unsparz=cli:main_decompress',
+        ],
+        'gui_scripts': [
+            'sparz-gui=gui:main_sparz_gui',
+            'unsparz-gui=gui:main_unsparz_gui',
         ],
     },
 )
