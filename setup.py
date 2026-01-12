@@ -36,8 +36,7 @@ setup(
             'unsparz=cli:main_decompress',
         ],
         'gui_scripts': [
-            'sparz-gui=gui:main_sparz_gui',
-            'unsparz-gui=gui:main_unsparz_gui',
+            'sparz-gui=gui:main',
         ],
     },
 )
