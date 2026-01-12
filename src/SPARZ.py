@@ -607,68 +607,136 @@ class SPARZIP:
                 new_block[i, r_start:r_end, c_start:c_end] = median_val
         return new_block
 
+    def _process_frame_to_sparse_single(self, frame):
+        """
+        Fused operation for single plane: find peaks, create mask, apply kernel, extract sparse.
+        Reduces dask task graph from 5 operations to 1 per block.
+        """
+        frame_2d = frame[0, :, :] if frame.ndim == 3 else frame
+
+        # Find peaks
+        peaks = peak_local_max(frame_2d,
+                              threshold_rel=self.rel_threshold,
+                              min_distance=1,
+                              footprint=np.ones((self.kernel_size, self.kernel_size)))
+
+        if len(peaks) == 0:
+            # Return empty sparse matrix
+            return sparse.COO(np.zeros_like(frame_2d, dtype='int16'))
+
+        # Create mask at peak locations
+        mask = np.zeros(frame_2d.shape, dtype='int16')
+        mask[peaks[:, 0], peaks[:, 1]] = 1
+
+        # Expand with kernel
+        kernel_mask = self.add_kernel(mask, self.kernel_size)
+
+        # Extract values where kernel is non-zero
+        masked = np.where(kernel_mask, frame_2d, 0).astype('int16')
+
+        return sparse.COO(masked)
+
+    def _process_biplane_frame(self, frame1, frame2):
+        """
+        Fused operation for biplane: find peaks in both, union, apply kernel.
+        Returns tuple of (sparse1, sparse2).
+        """
+        f1 = frame1[0, :, :] if frame1.ndim == 3 else frame1
+        f2 = frame2[0, :, :] if frame2.ndim == 3 else frame2
+
+        # Find peaks in both planes
+        peaks1 = peak_local_max(f1, threshold_rel=self.rel_threshold,
+                               min_distance=1, footprint=np.ones((self.kernel_size, self.kernel_size)))
+        peaks2 = peak_local_max(f2, threshold_rel=self.rel_threshold,
+                               min_distance=1, footprint=np.ones((self.kernel_size, self.kernel_size)))
+
+        # Union of peaks
+        if len(peaks1) == 0 and len(peaks2) == 0:
+            return sparse.COO(np.zeros_like(f1, dtype='int16')), sparse.COO(np.zeros_like(f2, dtype='int16'))
+
+        if len(peaks1) > 0 and len(peaks2) > 0:
+            merged = np.vstack([peaks1, peaks2])
+        elif len(peaks1) > 0:
+            merged = peaks1
+        else:
+            merged = peaks2
+
+        # Create union mask
+        mask = np.zeros(f1.shape, dtype='int16')
+        mask[merged[:, 0], merged[:, 1]] = 1
+
+        # Expand with kernel
+        kernel_mask = self.add_kernel(mask, self.kernel_size)
+
+        # Extract values from both planes
+        masked1 = np.where(kernel_mask, f1, 0).astype('int16')
+        masked2 = np.where(kernel_mask, f2, 0).astype('int16')
+
+        return sparse.COO(masked1), sparse.COO(masked2)
+
+    def _process_biplane_to_sparse_bp1(self, frame1, frame2):
+        """
+        Fused biplane operation returning sparse for plane 1.
+        Computes union of peaks from both planes, applies to plane 1.
+        """
+        sparse1, _ = self._process_biplane_frame(frame1, frame2)
+        return sparse1
+
+    def _process_biplane_to_sparse_bp2(self, frame1, frame2):
+        """
+        Fused biplane operation returning sparse for plane 2.
+        Computes union of peaks from both planes, applies to plane 2.
+        """
+        _, sparse2 = self._process_biplane_frame(frame1, frame2)
+        return sparse2
+
     def process_images(self):
         print('Processing images...')
-        # map1 = self.bp1.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16')
-        map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16') for blck in self.bp1]
-        if self.single_plane == False:
-            assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
-            # map2 = self.bp2.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16')
-            map2 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:],self.kernel_size,min_distance=1), dtype='int16') for blck in self.bp2]
-            # map_union = da.map_blocks(self.union, map1, map2, self.bp1[0,:,:].shape, dtype='int16')
-            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[0][0,:,:].shape, dtype='int16') for i in range(len(map1))]
-            # map_kernel = map_union.map_blocks(self.add_kernel, self.kernel_size, dtype='int16')
-            map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
-            # sp1 = da.where(map_kernel, self.bp1, 0)
-            try:
-                sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
-                # sp2 = da.where(map_kernel, self.bp2, 0)
-                sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
-            except TypeError:
-                def apply_where(kernel, img):
-                    return da.where(kernel, img, 0)
-                sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
-                sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
 
+        if self.single_plane:
+            print('Single plane - using fused processing')
             if self.peak_process == 'median':
                 print('Applying median patch...')
-                new_bp1 = []
-                for block in self.bp1:
-                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp1 = new_bp1  
+                self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
 
-                new_bp2 = []
-                for block in self.bp2:
-                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp2 = new_bp2
-            
+            # Fused single-plane processing: peaks -> mask -> kernel -> sparse in one operation
+            result = [blck.map_blocks(self._process_frame_to_sparse_single, dtype=object)
+                     for blck in self.bp1]
             print('Done.')
-            # return sp1.map_blocks(sparse.COO, dtype='int16'), sp2.map_blocks(sparse.COO, dtype='int16')
-            return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
-        print('single plane')
-        def add_mask(peaks:np.ndarray):
-            tmp = np.zeros(self.bp1[0][0,:,:].shape)
-            tmp[peaks[:, 0], peaks[:, 1]] = 1 
-            return tmp
-        map_mask = [b.map_blocks(lambda x: add_mask(x), dtype='int16') for b in map1]
-        map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
-        try:
-            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
-        except TypeError:
-            def apply_where(kernel, img):
-                return da.where(kernel, img, 0)
-            sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
-        finally:
-            if self.peak_process == 'median':
-                print('Applying median patch...')
-                new_bp1 = []
-                for block in self.bp1:
-                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp1 = new_bp1
+            return result, None
+
+        # Biplane processing - using fused operations
+        print('Biplane processing - using fused operations')
+        assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
+
+        if self.peak_process == 'median':
+            print('Applying median patch...')
+            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
+            self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
+
+        # Fused biplane processing: process both planes together for peak union
+        sp1_list = []
+        sp2_list = []
+
+        for i in range(len(self.bp1)):
+            # Use da.map_blocks with both arrays - fused peak finding and sparse conversion
+            sp1 = da.map_blocks(
+                self._process_biplane_to_sparse_bp1,
+                self.bp1[i], self.bp2[i],
+                dtype=object,
+                drop_axis=None
+            )
+            sp2 = da.map_blocks(
+                self._process_biplane_to_sparse_bp2,
+                self.bp1[i], self.bp2[i],
+                dtype=object,
+                drop_axis=None
+            )
+            sp1_list.append(sp1)
+            sp2_list.append(sp2)
+
         print('Done.')
-
-
-        return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
+        return sp1_list, sp2_list
 
     def extract_metadata(self):
         """
@@ -1124,26 +1192,42 @@ class SPARZIP:
                 }
 
         elif codec =='ffv1':
-            compression_levels = {0: {
+            compression_levels = {
+                                0: {  # Maximum compression
                                                 'vcodec': 'ffv1',
                                                 'pix_fmt': 'gray16le',
+                                                'level': '3',
+                                                'coder': '2',  # Range coder v2 (best)
+                                                'context': '1',  # Large context
+                                                'slices': '1',  # Single slice
+                                                'slicecrc': '0',
+                                                'g': '1',
                                 },
-                                1:{
+                                1: {  # High compression
                                                 'vcodec': 'ffv1',
                                                 'pix_fmt': 'gray16le',
-                                                'level': '3'
+                                                'level': '3',
+                                                'coder': '1',  # Range coder
+                                                'context': '1',
+                                                'slices': '1',
+                                                'slicecrc': '0',
                                 },
-                                2:{
+                                2: {  # Balanced
                                                 'vcodec': 'ffv1',
                                                 'pix_fmt': 'gray16le',
-                                                'level': '1'
+                                                'level': '3',
+                                                'coder': '1',
+                                                'context': '1',
+                                                'slices': '4',
                                 },
-                                3:{
+                                3: {  # Fast, decent compression
                                                 'vcodec': 'ffv1',
                                                 'pix_fmt': 'gray16le',
-                                                'level': '0'
+                                                'level': '3',
+                                                'coder': '0',  # Golomb-Rice (fast)
+                                                'context': '0',
+                                                'slices': '4',
                                 }
-    
                 }
         elif codec == 'prores':
             compression_levels = {
@@ -1228,17 +1312,22 @@ class SPARZIP:
                     self.bp2[k], video_name2, writer_args
                 ))
 
-        # Execute the delayed writes
-        if show_progress_bar:
-            with ProgressBar():
-                compute(*writes, scheduler='threads',num_workers=self.num_workers)
-        else:
-            compute(*writes, scheduler='threads',num_workers=self.num_workers)
-        
+        # Execute the delayed writes sequentially (one file at a time)
+        # FFmpeg is not optimized for parallel encoding - sequential reduces memory and CPU contention
+        print(f'Encoding {len(writes)} video file(s) sequentially...')
+        for i, write_task in enumerate(writes):
+            print(f'  Encoding file {i+1}/{len(writes)}...')
+            if show_progress_bar:
+                with ProgressBar():
+                    compute(write_task, scheduler='threads', num_workers=self.num_workers)
+            else:
+                compute(write_task, scheduler='threads', num_workers=self.num_workers)
+            gc.collect()
+
         # Save metadata for lossless restoration
         self.save_metadata()
 
-    def write_frames_to_video(self, bp1_block, video_name, writer_args, chunk_size=50):
+    def write_frames_to_video(self, bp1_block, video_name, writer_args, chunk_size=200):
         """
         Memory-optimized video encoding using streaming chunks instead of loading entire video into memory.
         Enhanced with better error handling, validation, and moov atom fix.
@@ -1452,112 +1541,156 @@ class SPARZIP:
             print("Warning: ffprobe not found. Skipping detailed video validation.")
             return True  # Assume valid if we can't validate
 
-    def zstd_compress(self, compression_level, effect_size, power, compute_dict):
-        # Perform power analysis to find sample size
+    def _shuffle_bytes(self, data: bytes, itemsize: int = 2) -> bytes:
+        """
+        Byte shuffle for better compression of numeric arrays.
+        Groups bytes by position within each element (all high bytes, then all low bytes).
+        """
+        arr = np.frombuffer(data, dtype=np.uint8)
+        n_elements = len(arr) // itemsize
+        if n_elements == 0:
+            return data
+        reshaped = arr[:n_elements * itemsize].reshape(n_elements, itemsize)
+        shuffled = reshaped.T.flatten()
+        return shuffled.tobytes()
+
+    def _unshuffle_bytes(self, data: bytes, itemsize: int = 2) -> bytes:
+        """Reverse the byte shuffle operation."""
+        arr = np.frombuffer(data, dtype=np.uint8)
+        n_elements = len(arr) // itemsize
+        if n_elements == 0:
+            return data
+        reshaped = arr[:n_elements * itemsize].reshape(itemsize, n_elements)
+        unshuffled = reshaped.T.flatten()
+        return unshuffled.tobytes()
+
+    def zstd_compress(self, compression_level, effect_size, power, compute_dict, use_delta=True, use_shuffle=True):
+        """
+        Compress data with zstd, optionally using delta encoding and byte shuffling.
+
+        Args:
+            compression_level: Zstd compression level (0-22)
+            effect_size: Effect size for power analysis (dictionary training)
+            power: Statistical power for sample size calculation
+            compute_dict: Whether to train and use a zstd dictionary
+            use_delta: Apply delta encoding across frames (default True)
+            use_shuffle: Apply byte shuffle for better compression (default True)
+        """
+        # Perform power analysis to find sample size for dictionary training
         analysis = TTestIndPower()
         sample_size = int(analysis.solve_power(effect_size=effect_size, power=power, alpha=0.05))
 
-        # Initialize the ZstdCompressor with the desired compression level
-        cctx = zstd.ZstdCompressor(level=compression_level)
+        print(f'Compressing with zstd level {compression_level} (delta={use_delta}, shuffle={use_shuffle})...')
 
-        # Sample and compress frames from bp1 and bp2
         for k in range(len(self.bp1)):
             input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
-            input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
-            # Assume self.bp1[k] and self.bp2[k] can be iterated chunk-wise
+
+            # Dictionary training if requested
+            bp1_dict = None
+            bp2_dict = None
             if compute_dict:
-            # Compute sample size based frames
-                bp1_samples = np.random.choice(self.bp1[k].shape[0], sample_size, replace=False)
+                bp1_samples = np.random.choice(self.bp1[k].shape[0], min(sample_size, self.bp1[k].shape[0]), replace=False)
                 bp1_samples = self.bp1[k][bp1_samples].flatten().compute()
                 bp1_sample_bytes = [sample.tobytes() for sample in bp1_samples]
-                bp2_samples = np.random.choice(self.bp2[k].shape[0], sample_size, replace=False)
-                bp2_samples = self.bp2[k][bp2_samples].flatten().compute()
-                bp2_sample_bytes = [sample.tobytes() for sample in bp2_samples]
-            
-                print(f'Training dictionaries with {sample_size} samples...')
-                bp1_dict = zstd.ZstdCompressionDict(bp1_samples,dict_type=zstd.DICT_TYPE_RAWCONTENT)
-                bp2_dict = zstd.ZstdCompressionDict(bp2_samples,dict_type=zstd.DICT_TYPE_RAWCONTENT)
-                
-                bp1_dict = zstd.train_dictionary(dict_size=131072,samples=bp1_sample_bytes)
-                bp2_dict = zstd.train_dictionary(dict_size=131072,samples=bp2_sample_bytes)
-                        
+                print(f'Training dictionary with {len(bp1_sample_bytes)} samples...')
+                bp1_dict = zstd.train_dictionary(dict_size=131072, samples=bp1_sample_bytes)
 
-                print(f'Compressing data with compression level {compression_level}...')
+                if not self.single_plane:
+                    bp2_samples = np.random.choice(self.bp2[k].shape[0], min(sample_size, self.bp2[k].shape[0]), replace=False)
+                    bp2_samples = self.bp2[k][bp2_samples].flatten().compute()
+                    bp2_sample_bytes = [sample.tobytes() for sample in bp2_samples]
+                    bp2_dict = zstd.train_dictionary(dict_size=131072, samples=bp2_sample_bytes)
 
-            else:
-                print(f'Compressing data with compression level {compression_level} without dictionary...')
-
-
-
+            # Compress BP1
             output_file1 = f'{self.output_path}{input_file_name1}_level_{compression_level}.zst'
-            output_file2 = f'{self.output_path}{input_file_name2}_level_{compression_level}.zst'
+            self._zstd_compress_array(self.bp1[k], output_file1, compression_level,
+                                      bp1_dict, use_delta, use_shuffle)
 
-            try:
-                with open(output_file1, 'wb') as f1:
-                    if compute_dict:
-                        cctx = zstd.ZstdCompressor(dict_data=bp1_dict, level=compression_level)
+            # Compress BP2 if biplane
+            if not self.single_plane:
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                output_file2 = f'{self.output_path}{input_file_name2}_level_{compression_level}.zst'
+                self._zstd_compress_array(self.bp2[k], output_file2, compression_level,
+                                          bp2_dict, use_delta, use_shuffle)
+
+    def _zstd_compress_array(self, data_array, output_file, compression_level, zstd_dict, use_delta, use_shuffle):
+        """
+        Compress a single dask array to a zst file with optional delta encoding and shuffle.
+        """
+        try:
+            with open(output_file, 'wb') as f:
+                # Build flags byte (backward compatible with old format)
+                flags = 0
+                if zstd_dict is not None:
+                    flags |= 0x01  # bit 0: dictionary present
+                if use_delta:
+                    flags |= 0x02  # bit 1: delta encoded
+                if use_shuffle:
+                    flags |= 0x04  # bit 2: shuffled
+
+                # Write flags byte
+                f.write(np.array([flags], dtype=np.uint8).tobytes())
+
+                # Write dictionary if present
+                if zstd_dict is not None:
+                    f.write(np.array([len(zstd_dict)], dtype=np.int32).tobytes())
+                    f.write(zstd_dict.as_bytes())
+
+                # Write shape and dtype
+                f.write(np.array(data_array.shape, dtype=np.int32).tobytes())
+                f.write(np.array(str(data_array.dtype), dtype='S20').tobytes())
+
+                # Setup compressor
+                if zstd_dict is not None:
+                    cctx = zstd.ZstdCompressor(dict_data=zstd_dict, level=compression_level)
+                else:
+                    cctx = zstd.ZstdCompressor(level=compression_level)
+
+                compressor = cctx.stream_writer(f, write_size=32768)
+
+                # Determine itemsize for shuffle
+                itemsize = data_array.dtype.itemsize
+
+                # Process frames with delta encoding and progress bar
+                prev_frame = None
+                original_size = 0
+                n_frames = data_array.shape[0]
+                pbar = tqdm(total=n_frames, desc=f'  Compressing {os.path.basename(output_file)}', unit='frame')
+                for chunk in data_array:
+                    frame = chunk.compute()
+                    original_size += frame.nbytes
+                    pbar.update(1)
+
+                    if use_delta and prev_frame is not None:
+                        # Delta encode: store difference from previous frame as int16
+                        delta = (frame.astype(np.int32) - prev_frame.astype(np.int32)).astype(np.int16)
+                        data_to_compress = delta
+                        itemsize_for_shuffle = 2  # int16
                     else:
-                        cctx = zstd.ZstdCompressor(level=compression_level)
+                        data_to_compress = frame
+                        itemsize_for_shuffle = itemsize
 
-                    zdict_present = 1 if compute_dict else 0
-                    compressor1 = cctx.stream_writer(f1, write_size=32768)
-                    
-                    # Write dictionary presence flag
-                    f1.write(np.array([zdict_present], dtype=np.uint8).tobytes())
-                    
-                    if compute_dict:
-                        # Write dictionary length and content if present
-                        f1.write(np.array([len(bp1_dict)], dtype=np.int32).tobytes())
-                        f1.write(bp1_dict.as_bytes())
-                    
-                    # Serialize and compress array shape and dtype
-                    shape_bytes = np.array(self.bp1[k].shape, dtype=np.int32).tobytes()
-                    f1.write(shape_bytes)
-                    
-                    dtype_bytes = np.array(str(self.bp1[k].dtype), dtype='S20').tobytes()
-                    f1.write(dtype_bytes)
-                    
-                    # Compress data chunks
-                    for chunk in self.bp1[k]:
-                        compressor1.write(chunk.compute().tobytes())
-                        
-                    compressor1.flush(zstd.FLUSH_FRAME)
-            except Exception as e:
-                print(f"Error during compression: {e}")
+                    prev_frame = frame.copy()
 
-            try:
-                with open(output_file2, 'wb') as f1:
-                    if compute_dict:
-                        # If dictionary computation is desired, initialize compressor with the dictionary
-                        cctx = zstd.ZstdCompressor(dict_data=bp2_dict, level=compression_level)
-                    else:
-                        cctx = zstd.ZstdCompressor(level=compression_level)
+                    # Convert to bytes
+                    frame_bytes = data_to_compress.tobytes()
 
-                    zdict_present = 1 if compute_dict else 0
-                    compressor1 = cctx.stream_writer(f1, write_size=32768)
-                    
-                    # Write dictionary presence flag
-                    f1.write(np.array([zdict_present], dtype=np.uint8).tobytes())
-                    
-                    if compute_dict:
-                        # Write dictionary length and content if present
-                        f1.write(np.array([len(bp2_dict)], dtype=np.int32).tobytes())
-                        f1.write(bp2_dict.as_bytes())
-                    
-                    # Serialize and compress array shape and dtype
-                    shape_bytes = np.array(self.bp2[k].shape, dtype=np.int32).tobytes()
-                    f1.write(shape_bytes)
-                    
-                    dtype_bytes = np.array(str(self.bp2[k].dtype), dtype='S20').tobytes()
-                    f1.write(dtype_bytes)
-                    
-                    # Compress data chunks
-                    for chunk in self.bp2[k]:
-                        compressor1.write(chunk.compute().tobytes())
-                        
-                    compressor1.flush(zstd.FLUSH_FRAME)
-            except Exception as e:
-                print(f"Error during compression: {e}")
+                    # Apply byte shuffle
+                    if use_shuffle:
+                        frame_bytes = self._shuffle_bytes(frame_bytes, itemsize=itemsize_for_shuffle)
+
+                    compressor.write(frame_bytes)
+
+                pbar.close()
+                compressor.flush(zstd.FLUSH_FRAME)
+
+            # Print compression stats
+            compressed_size = os.path.getsize(output_file)
+            ratio = original_size / compressed_size if compressed_size > 0 else 0
+            print(f'  {os.path.basename(output_file)}: {original_size/1e6:.2f}MB -> {compressed_size/1e6:.2f}MB ({ratio:.1f}x)')
+
+        except Exception as e:
+            print(f"Error during compression of {output_file}: {e}")
 
     def _detect_individual_ifd_variation(self, individual_ifds):
         """
@@ -1614,37 +1747,82 @@ class SPARZIP:
 
     def save_npz_with_metadata(self, filepath, sparse_matrix, metadata_entry=None):
         """
-        Save sparse matrix to NPZ file. Embeds metadata if not saving to JSON.
+        Save sparse matrix with zstd compression and delta-encoded coordinates.
         """
         try:
-            # Convert sparse matrix to COO format and compute if needed (from original design)
+            # Convert sparse matrix to COO format and compute if needed
             if hasattr(sparse_matrix, 'compute'):
                 sparse_data = sparse_matrix.compute()
             else:
                 sparse_data = sparse_matrix
-            
+
             # Ensure it's in COO format
             if hasattr(sparse_data, 'tocoo') and not isinstance(sparse_data, sparse.COO):
                 sparse_data = sparse_data.tocoo()
 
+            # Delta encode coordinates for better compression
+            coords = sparse_data.coords
+            delta_coords = self._delta_encode_coords(coords)
+
             data_to_save = {
                 'data': sparse_data.data,
-                'coords': sparse_data.coords,
-                'shape': sparse_data.shape,
+                'delta_coords': delta_coords,
+                'shape': np.array(sparse_data.shape),
+                'encoding': 'delta',
             }
 
             # Embed metadata only if the flag is not set and metadata exists
             if metadata_entry and not self.save_metadata_to_json:
                 serialized_metadata = serialize_metadata([metadata_entry])[0]
                 data_to_save['metadata'] = json.dumps(serialized_metadata, ensure_ascii=False)
-            
-            # Save using numpy's compressed format
-            np.savez_compressed(filepath, **data_to_save)
-            
+
+            # Save with zstd compression
+            self._save_with_zstd(filepath, data_to_save)
+
         except Exception as e:
             print(f'Error saving NPZ to {filepath}: {e}')
             # Fallback to standard sparse save
             sparse.save_npz(filepath, sparse_matrix)
+
+    def _delta_encode_coords(self, coords):
+        """
+        Delta encode coordinates for better compression.
+        Peaks often persist across frames, so frame indices have runs.
+        Delta encoding reduces entropy significantly.
+        """
+        if coords.shape[1] == 0:
+            return coords.astype(np.int32)
+
+        # Sort by frame index first for better delta compression
+        sort_idx = np.lexsort((coords[2], coords[1], coords[0]))
+        sorted_coords = coords[:, sort_idx]
+
+        # Delta encode: first value is absolute, rest are deltas
+        delta = np.zeros_like(sorted_coords, dtype=np.int32)
+        delta[:, 0] = sorted_coords[:, 0]
+        delta[:, 1:] = np.diff(sorted_coords, axis=1)
+
+        return delta
+
+    def _save_with_zstd(self, filepath, data_dict, level=19):
+        """Save data dictionary with zstd compression."""
+        import io
+
+        # First save to NPZ in memory
+        buffer = io.BytesIO()
+        np.savez(buffer, **data_dict)
+        npz_bytes = buffer.getvalue()
+
+        # Compress with zstd (level 19 for high compression)
+        cctx = zstd.ZstdCompressor(level=level)
+        compressed = cctx.compress(npz_bytes)
+
+        # Write to file
+        with open(filepath, 'wb') as f:
+            f.write(compressed)
+
+        compression_ratio = 100 * len(compressed) / len(npz_bytes) if len(npz_bytes) > 0 else 0
+        print(f'  Saved {os.path.basename(filepath)}: {len(npz_bytes)/1e6:.2f}MB -> {len(compressed)/1e6:.2f}MB ({compression_ratio:.1f}%)')
     
     def save_metadata(self):
         """
@@ -1684,6 +1862,38 @@ class SPARZIP:
             except Exception as e:
                 print(f'Error saving BP2 metadata to {metadata_file_bp2}: {e}')
 
+    def _print_compression_stats(self):
+        """Print breakdown of compressed file sizes."""
+        npz_files = glob.glob(f'{self.output_path}*.npz')
+        video_files = (glob.glob(f'{self.output_path}*.mp4') +
+                      glob.glob(f'{self.output_path}*.avi') +
+                      glob.glob(f'{self.output_path}*.mov'))
+
+        npz_size = sum(os.path.getsize(f) for f in npz_files) if npz_files else 0
+        video_size = sum(os.path.getsize(f) for f in video_files) if video_files else 0
+        total_size = npz_size + video_size
+
+        # Estimate original size from dask arrays
+        original_size = 0
+        try:
+            for arr in self.bp1:
+                if hasattr(arr, 'nbytes'):
+                    original_size += arr.nbytes
+                elif hasattr(arr, 'dtype') and hasattr(arr, 'shape'):
+                    original_size += arr.dtype.itemsize * np.prod(arr.shape)
+        except Exception:
+            pass
+
+        print(f"\n=== Compression Statistics ===")
+        print(f"  Video files: {video_size / 1e6:.1f} MB ({len(video_files)} files)")
+        if npz_size > 0:
+            print(f"  NPZ files:   {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
+        print(f"  Total:       {total_size / 1e6:.1f} MB")
+        if original_size > 0 and total_size > 0:
+            ratio = original_size / total_size
+            print(f"  Compression ratio: {ratio:.1f}x")
+        print("=" * 31)
+
     def run(self,codec:str='x265', compression_level:int=0,custom_dict:dict=None,custom_file_extension:str=None,compute_zstd_dict:bool=False):#,find_peaks:bool=True):
         if codec!='zstd' and compute_zstd_dict:
             print ('Warning: Dictionary computation is only supported for Zstandard compression. Ignoring compute_zstd_dict flag.')
@@ -1692,10 +1902,16 @@ class SPARZIP:
         if (self.find_roi) and (codec =='zstd'):
             print ('Warning: ROI detection is not supported for Zstandard compression. Ignoring find_roi flag.')
             self.find_roi = False
-            
-        if (self.find_roi):
+
+        # Determine if codec is truly lossless (no data loss)
+        # ffv1 with gray16le preserves all 16 bits, so sparse matrix is redundant
+        is_truly_lossless = (codec == 'ffv1')
+
+        if self.find_roi and not is_truly_lossless:
             self.deflate()
             gc.collect()
+        elif is_truly_lossless and self.find_roi:
+            print('Skipping sparse matrix storage - ffv1 codec is truly lossless (16-bit preserved).')
         if codec in ['x265', 'av1', 'x264', 'ffv1', 'prores', 'user']:
             assert compression_level in [0,1,2,3], 'Error: Compression level for ffmpeg based compression must be 0, 1, 2 or 3.'
             self.encode(codec=codec, compression_lvl=compression_level,custom_dict=custom_dict,custom_file_extension=custom_file_extension)
@@ -1708,6 +1924,9 @@ class SPARZIP:
         # Create single MKV file if requested
         if self.create_single_file:
             self.package_to_mkv(codec, compression_level)
+
+        # Print compression statistics
+        self._print_compression_stats()
 
     def package_to_mkv(self, codec, compression_level):
         """
@@ -2574,42 +2793,68 @@ class SPARUNZIP:
     def load_sparse_matrix_from_npz(self, npz_file_path):
         """
         Load sparse matrix from NPZ file, handling multiple formats.
-        Compatible with original (45e86e9), current, and legacy formats.
+        Compatible with zstd+delta (new), original (45e86e9), current, and legacy formats.
         """
+        import io
+
         try:
-            npz_data = np.load(npz_file_path, allow_pickle=True)
-            
+            # Read file bytes to check format
+            with open(npz_file_path, 'rb') as f:
+                file_bytes = f.read()
+
+            # Check if zstd compressed (magic bytes: 0x28 0xB5 0x2F 0xFD)
+            if file_bytes[:4] == b'\x28\xb5\x2f\xfd':
+                # Decompress with zstd
+                dctx = zstd.ZstdDecompressor()
+                decompressed = dctx.decompress(file_bytes)
+                npz_data = np.load(io.BytesIO(decompressed), allow_pickle=True)
+            else:
+                # Standard NPZ file
+                npz_data = np.load(npz_file_path, allow_pickle=True)
+
+            # Check for new format with delta encoding
+            if 'encoding' in npz_data and str(npz_data['encoding']) == 'delta':
+                data = npz_data['data']
+                delta_coords = npz_data['delta_coords']
+                shape = tuple(npz_data['shape'])
+
+                # Decode delta-encoded coordinates
+                coords = self._delta_decode_coords(delta_coords)
+
+                sparse_matrix = sparse.COO(coords=coords, data=data, shape=shape)
+                return sparse_matrix
+
             # Check for original format from 45e86e9 (data, coords, shape)
-            if 'data' in npz_data and 'coords' in npz_data and 'shape' in npz_data:
-                # Original format: reconstruct sparse matrix from coords
+            elif 'data' in npz_data and 'coords' in npz_data and 'shape' in npz_data:
                 data = npz_data['data']
                 coords = npz_data['coords']
                 shape = tuple(npz_data['shape'])
-                
-                # Reconstruct sparse matrix
+
                 sparse_matrix = sparse.COO(coords=coords, data=data, shape=shape)
                 return sparse_matrix
-            
+
             # Check for current format with separate row/col arrays
             elif 'data' in npz_data and 'row' in npz_data and 'col' in npz_data and 'shape' in npz_data:
-                # Current format: reconstruct sparse matrix from separate row/col
                 data = npz_data['data']
-                row = npz_data['row'] 
+                row = npz_data['row']
                 col = npz_data['col']
                 shape = tuple(npz_data['shape'])
-                
-                # Reconstruct sparse matrix
+
                 sparse_matrix = sparse.COO(coords=[row, col], data=data, shape=shape)
                 return sparse_matrix
-            
+
             else:
                 # Legacy format: fallback to sparse.load_npz
                 return sparse.load_npz(npz_file_path)
-                
+
         except Exception as e:
             print(f'Error loading sparse matrix from {npz_file_path}: {e}')
             # Final fallback
             return sparse.load_npz(npz_file_path)
+
+    def _delta_decode_coords(self, delta_coords):
+        """Decode delta-encoded coordinates."""
+        return np.cumsum(delta_coords, axis=1)
 
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
@@ -2766,43 +3011,112 @@ class SPARUNZIP:
         return bp1, None
         # return vimread(path_bp1, dtypes='uint16'), vimread(path_bp2, dtypes='uint16')
 
+    def _unshuffle_bytes(self, data: bytes, itemsize: int = 2) -> bytes:
+        """Reverse the byte shuffle operation."""
+        arr = np.frombuffer(data, dtype=np.uint8)
+        n_elements = len(arr) // itemsize
+        if n_elements == 0:
+            return data
+        reshaped = arr[:n_elements * itemsize].reshape(itemsize, n_elements)
+        unshuffled = reshaped.T.flatten()
+        return unshuffled.tobytes()
+
+    def _decode_zst_file(self, file_path):
+        """
+        Decode a single zst file, handling new format (flags, delta, shuffle) and old format.
+        """
+        with open(file_path, 'rb') as f:
+            # Read flags byte
+            flags = np.frombuffer(f.read(1), dtype=np.uint8)[0]
+
+            # Determine format and parse flags
+            # Old format: flags was just 0 or 1 (zdict_present)
+            # New format: flags is a bitfield (0-7 are valid)
+            if flags <= 7:
+                # Could be new format
+                zdict_present = bool(flags & 0x01)
+                delta_encoded = bool(flags & 0x02)
+                shuffled = bool(flags & 0x04)
+            else:
+                # Old format - flags byte was actually zdict_present (0 or 1)
+                # This shouldn't happen with old files since they only had 0 or 1
+                # But handle gracefully
+                f.seek(0)
+                flags = np.frombuffer(f.read(1), dtype=np.uint8)[0]
+                zdict_present = bool(flags)
+                delta_encoded = False
+                shuffled = False
+
+            # Read dictionary if present
+            if zdict_present:
+                zdict_length = np.frombuffer(f.read(4), dtype=np.int32)[0]
+                zdict = f.read(zdict_length)
+                zstd_dict = zstd.ZstdCompressionDict(zdict)
+                dctx = zstd.ZstdDecompressor(dict_data=zstd_dict)
+            else:
+                dctx = zstd.ZstdDecompressor()
+
+            # Read shape and dtype
+            data_shape = tuple(np.frombuffer(f.read(12), dtype=np.int32))
+            dtype_str = np.frombuffer(f.read(20), dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
+            data_dtype = np.dtype(dtype_str)
+
+            # Decompress data
+            with dctx.stream_reader(f) as reader:
+                decompressed_data = reader.read()
+
+            # Calculate frame parameters
+            n_frames = data_shape[0]
+            frame_shape = data_shape[1:]
+            frame_size = int(np.prod(frame_shape))
+
+            if delta_encoded:
+                # Delta decoding required
+                # First frame is original dtype, subsequent frames are int16 deltas
+                frames = np.zeros(data_shape, dtype=data_dtype)
+
+                # Determine bytes per frame based on encoding
+                first_frame_bytes = frame_size * data_dtype.itemsize
+                delta_frame_bytes = frame_size * 2  # int16
+
+                offset = 0
+                for i in range(n_frames):
+                    if i == 0:
+                        # First frame: original dtype
+                        frame_data = decompressed_data[offset:offset + first_frame_bytes]
+                        if shuffled:
+                            frame_data = self._unshuffle_bytes(frame_data, itemsize=data_dtype.itemsize)
+                        frames[i] = np.frombuffer(frame_data, dtype=data_dtype).reshape(frame_shape)
+                        offset += first_frame_bytes
+                    else:
+                        # Subsequent frames: int16 deltas
+                        frame_data = decompressed_data[offset:offset + delta_frame_bytes]
+                        if shuffled:
+                            frame_data = self._unshuffle_bytes(frame_data, itemsize=2)
+                        delta = np.frombuffer(frame_data, dtype=np.int16).reshape(frame_shape)
+                        frames[i] = (frames[i-1].astype(np.int32) + delta).astype(data_dtype)
+                        offset += delta_frame_bytes
+
+                data_array = frames
+            else:
+                # No delta encoding - simple reshape
+                if shuffled:
+                    decompressed_data = self._unshuffle_bytes(decompressed_data, itemsize=data_dtype.itemsize)
+                data_array = np.frombuffer(decompressed_data, dtype=data_dtype).reshape(data_shape)
+
+            return da.from_array(data_array)
+
     def decode_zst(self, path_bp1: str, path_bp2: str = None):
-        print('Decoding images...')
+        """
+        Decode zst compressed files, supporting both old and new formats.
+        New format supports delta encoding and byte shuffle for better compression.
+        """
+        print('Decoding zst images...')
         files_bp1 = sorted(glob.glob(path_bp1))
 
         bp1 = []
         for file_path in files_bp1:
-            with open(file_path, 'rb') as f:
-                zdict_present = np.frombuffer(f.read(1), dtype=np.uint8)[0]
-                if zdict_present:
-                    # Read the length of the zdict
-                    zdict_length = np.frombuffer(f.read(4), dtype=np.int32)[0]
-                    # Read the zdict itself
-                    zdict = f.read(zdict_length)
-                    zstd_dict_bp1 = zstd.ZstdCompressionDict(zdict)
-                    dctx_bp1 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp1)
-                    # Adjust the start of the actual data
-                    # start_of_data = f.tell()  # Adjusted to current file position
-                else:
-                    # If no zdict, the actual data starts after the flag
-                    # start_of_data = 1
-                    dctx_bp1 = zstd.ZstdDecompressor()
-                
-                data_shape = np.frombuffer(f.read(12), dtype=np.int32)
-                dtype_str = np.frombuffer(f.read(20), dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
-                # Here's the key change: Seek to the start of the actual compressed data
-                start_of_data = f.tell() 
-                f.seek(start_of_data)
-                with dctx_bp1.stream_reader(f) as reader:
-                    decompressed_data = reader.read()
-
-                # Assuming the metadata (shape and dtype) is at the beginning of the decompressed data
-                
-                data_dtype = np.dtype(dtype_str)
-                data_array = np.frombuffer(decompressed_data, dtype=data_dtype).reshape(data_shape)
-                bp1.append(da.from_array(data_array))
-
-        # Similar adjustments would be needed for `files_bp2` handling
+            bp1.append(self._decode_zst_file(file_path))
 
         if path_bp2:
             files_bp2 = sorted(glob.glob(path_bp2))
@@ -2810,37 +3124,9 @@ class SPARUNZIP:
             assert len(files_bp1) == len(files_bp2), 'Error: Both biplanes must have the same number of images.'
             bp2 = []
             for file_path in files_bp2:
-                with open(file_path, 'rb') as f:
-                    zdict_present = np.frombuffer(f.read(1), dtype=np.uint8)[0]
-                    if zdict_present:
-                        # Read the length of the zdict
-                        zdict_length = np.frombuffer(f.read(4), dtype=np.int32)[0]
-                        # Read the zdict itself
-                        zdict = f.read(zdict_length)
-                        zstd_dict_bp2 = zstd.ZstdCompressionDict(zdict)
-                        dctx_bp2 = zstd.ZstdDecompressor(dict_data=zstd_dict_bp2)
-                        # Adjust the start of the actual data
-                        # start_of_data = f.tell()  # Adjusted to current file position
-                    else:
-                        # If no zdict, the actual data starts after the flag
-                        # start_of_data = 1
-                        dctx_bp2 = zstd.ZstdDecompressor()
-
-                    data_shape = np.frombuffer(f.read(12), dtype=np.int32)
-                    dtype_str = np.frombuffer(f.read(20), dtype='S20').tobytes().decode('utf-8').rstrip('\x00')
-                    start_of_data = f.tell() 
-                    # Here's the key change: Seek to the start of the actual compressed data
-                    f.seek(start_of_data)
-                    with dctx_bp2.stream_reader(f) as reader:
-                        decompressed_data = reader.read()
-
-                    # Assuming the metadata (shape and dtype) is at the beginning of the decompressed data
-
-                    data_dtype = np.dtype(dtype_str)
-                    data_array = np.frombuffer(decompressed_data, dtype=data_dtype).reshape(data_shape)
-                    bp2.append(da.from_array(data_array))
-
-        return bp1, None if path_bp2 is None else bp2
+                bp2.append(self._decode_zst_file(file_path))
+            return bp1, bp2
+        return bp1, None
         
 
     def process_frames(self):
