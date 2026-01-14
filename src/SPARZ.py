@@ -1746,7 +1746,7 @@ class SPARZIP:
 
     def save_npz_with_metadata(self, filepath, sparse_matrix, metadata_entry=None):
         """
-        Save sparse matrix with zstd compression and delta-encoded coordinates.
+        Save sparse matrix with zstd compression, delta-encoded and byte-shuffled coordinates.
         """
         try:
             # Convert sparse matrix to COO format and compute if needed
@@ -1763,11 +1763,18 @@ class SPARZIP:
             coords = sparse_data.coords
             delta_coords = self._delta_encode_coords(coords)
 
+            # Byte shuffle delta_coords for even better compression
+            # Store as uint8 array after shuffling
+            delta_coords_shape = delta_coords.shape
+            shuffled_bytes = self._shuffle_bytes(delta_coords.tobytes(), itemsize=4)
+            shuffled_coords = np.frombuffer(shuffled_bytes, dtype=np.uint8)
+
             data_to_save = {
                 'data': sparse_data.data,
-                'delta_coords': delta_coords,
+                'shuffled_coords': shuffled_coords,
+                'coords_shape': np.array(delta_coords_shape),
                 'shape': np.array(sparse_data.shape),
-                'encoding': 'delta',
+                'encoding': 'delta_shuffled',
             }
 
             # Embed metadata only if the flag is not set and metadata exists
@@ -2792,7 +2799,7 @@ class UNSPARZ:
     def load_sparse_matrix_from_npz(self, npz_file_path):
         """
         Load sparse matrix from NPZ file, handling multiple formats.
-        Compatible with zstd+delta (new), original (45e86e9), current, and legacy formats.
+        Compatible with zstd+delta+shuffle (newest), zstd+delta, original (45e86e9), current, and legacy formats.
         """
         import io
 
@@ -2811,7 +2818,24 @@ class UNSPARZ:
                 # Standard NPZ file
                 npz_data = np.load(npz_file_path, allow_pickle=True)
 
-            # Check for new format with delta encoding
+            # Check for new format with delta encoding + byte shuffle
+            if 'encoding' in npz_data and str(npz_data['encoding']) == 'delta_shuffled':
+                data = npz_data['data']
+                shuffled_coords = npz_data['shuffled_coords']
+                coords_shape = tuple(npz_data['coords_shape'])
+                shape = tuple(npz_data['shape'])
+
+                # Unshuffle bytes and reconstruct delta_coords
+                unshuffled_bytes = self._unshuffle_bytes(shuffled_coords.tobytes(), itemsize=4)
+                delta_coords = np.frombuffer(unshuffled_bytes, dtype=np.int32).reshape(coords_shape)
+
+                # Decode delta-encoded coordinates
+                coords = self._delta_decode_coords(delta_coords)
+
+                sparse_matrix = sparse.COO(coords=coords, data=data, shape=shape)
+                return sparse_matrix
+
+            # Check for older format with delta encoding (no shuffle)
             if 'encoding' in npz_data and str(npz_data['encoding']) == 'delta':
                 data = npz_data['data']
                 delta_coords = npz_data['delta_coords']
