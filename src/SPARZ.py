@@ -25,8 +25,7 @@ from dask.diagnostics import ProgressBar
 import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 import av
-import concurrent.futures
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 # import joblib
 
 #%%
@@ -691,51 +690,67 @@ class SPARZIP:
 
     def process_images(self):
         print('Processing images...')
+        # Step 1: Find peaks in plane 1
+        map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
 
-        if self.single_plane:
-            print('Single plane - using fused processing')
+        if self.single_plane == False:
+            assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
+            # Step 2: Find peaks in plane 2
+            map2 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp2]
+            # Step 3: Union of peaks from both planes
+            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[0][0,:,:].shape, dtype='int16') for i in range(len(map1))]
+            # Step 4: Expand peaks with kernel
+            map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
+            # Step 5: Apply mask to extract ROI values
+            try:
+                sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+                sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
+            except TypeError:
+                def apply_where(kernel, img):
+                    return da.where(kernel, img, 0)
+                sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+                sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
+
             if self.peak_process == 'median':
                 print('Applying median patch...')
-                self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
+                new_bp1 = []
+                for block in self.bp1:
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1
 
-            # Fused single-plane processing: peaks -> mask -> kernel -> sparse in one operation
-            result = [blck.map_blocks(self._process_frame_to_sparse_single, dtype=object)
-                     for blck in self.bp1]
+                new_bp2 = []
+                for block in self.bp2:
+                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp2 = new_bp2
+
             print('Done.')
-            return result, None
+            # Step 6: Convert to sparse at the end
+            return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
 
-        # Biplane processing - using fused operations
-        print('Biplane processing - using fused operations')
-        assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
+        # Single plane processing
+        print('Single plane')
+        def add_mask(peaks):
+            tmp = np.zeros(self.bp1[0][0,:,:].shape)
+            tmp[peaks[:, 0], peaks[:, 1]] = 1
+            return tmp
+        map_mask = [b.map_blocks(lambda x: add_mask(x), dtype='int16') for b in map1]
+        map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
+        try:
+            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+        except TypeError:
+            def apply_where(kernel, img):
+                return da.where(kernel, img, 0)
+            sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
 
         if self.peak_process == 'median':
             print('Applying median patch...')
-            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
-            self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
-
-        # Fused biplane processing: process both planes together for peak union
-        sp1_list = []
-        sp2_list = []
-
-        for i in range(len(self.bp1)):
-            # Use da.map_blocks with both arrays - fused peak finding and sparse conversion
-            sp1 = da.map_blocks(
-                self._process_biplane_to_sparse_bp1,
-                self.bp1[i], self.bp2[i],
-                dtype=object,
-                drop_axis=None
-            )
-            sp2 = da.map_blocks(
-                self._process_biplane_to_sparse_bp2,
-                self.bp1[i], self.bp2[i],
-                dtype=object,
-                drop_axis=None
-            )
-            sp1_list.append(sp1)
-            sp2_list.append(sp2)
+            new_bp1 = []
+            for block in self.bp1:
+                new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+            self.bp1 = new_bp1
 
         print('Done.')
-        return sp1_list, sp2_list
+        return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
 
     def extract_metadata(self):
         """
@@ -1883,10 +1898,11 @@ class SPARZIP:
         video_files = (glob.glob(f'{self.output_path}*.mp4') +
                       glob.glob(f'{self.output_path}*.avi') +
                       glob.glob(f'{self.output_path}*.mov'))
+        mkv_files = glob.glob(f'{self.output_path}*.mkv')
 
         npz_size = sum(os.path.getsize(f) for f in npz_files) if npz_files else 0
         video_size = sum(os.path.getsize(f) for f in video_files) if video_files else 0
-        total_size = npz_size + video_size
+        mkv_size = sum(os.path.getsize(f) for f in mkv_files) if mkv_files else 0
 
         # Estimate original size from dask arrays
         original_size = 0
@@ -1900,9 +1916,16 @@ class SPARZIP:
             pass
 
         print(f"\n=== Compression Statistics ===")
-        print(f"  Video files: {video_size / 1e6:.1f} MB ({len(video_files)} files)")
-        if npz_size > 0:
-            print(f"  NPZ files:   {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
+        if mkv_files:
+            # Single-file mode: source files were cleaned up
+            total_size = mkv_size
+            print(f"  MKV files:   {mkv_size / 1e6:.1f} MB ({len(mkv_files)} files)")
+        else:
+            # Separate files mode
+            total_size = npz_size + video_size
+            print(f"  Video files: {video_size / 1e6:.1f} MB ({len(video_files)} files)")
+            if npz_size > 0:
+                print(f"  NPZ files:   {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
         print(f"  Total:       {total_size / 1e6:.1f} MB")
         if original_size > 0 and total_size > 0:
             ratio = original_size / total_size
@@ -2002,32 +2025,37 @@ class SPARZIP:
         if not video_files:
             print('Warning: No video files found. Skipping MKV packaging.')
             return
-        
-        # Find all NPZ files
-        npz_pattern = os.path.join(self.output_path, '*.npz')
-        npz_files = glob.glob(npz_pattern)
-        
-        if not npz_files:
-            print('Warning: No NPZ files found. Skipping MKV packaging.')
-            return
-        
+
         # Create MKV files for each video file
         import subprocess
         successful_count = 0
         failed_count = 0
-        
+
         for video_file, mkv_file in zip(video_files, mkv_files_to_create):
             try:
                 print(f'  Creating MKV: {os.path.basename(mkv_file)}...')
-                
+
+                # Find the corresponding NPZ file for this video
+                # Video: {stem}_compression_level_{level}.mp4 -> NPZ: {stem}.npz
+                video_basename = os.path.basename(video_file)
+                # Remove _compression_level_X.ext suffix to get original stem
+                stem = video_basename.rsplit('_compression_level_', 1)[0]
+                corresponding_npz = os.path.join(self.output_path, f'{stem}.npz')
+
+                if not os.path.exists(corresponding_npz):
+                    print(f'  WARNING: No matching NPZ file found for {video_basename}')
+                    npz_to_attach = []
+                else:
+                    npz_to_attach = [corresponding_npz]
+
                 # Build ffmpeg command manually for better control over attachments
                 cmd = [
                     'ffmpeg', '-y',  # Overwrite output
                     '-i', video_file,  # Input video
                 ]
-                
-                # Add NPZ files as attachments
-                for i, npz_file in enumerate(npz_files):
+
+                # Add NPZ file as attachment (only the corresponding one)
+                for i, npz_file in enumerate(npz_to_attach):
                     cmd.extend(['-attach', npz_file])
                     # Add metadata for each attachment
                     cmd.extend(['-metadata:s:t:{}'.format(i), 'mimetype=application/octet-stream'])
@@ -2073,23 +2101,31 @@ class SPARZIP:
                 successful_count += 1
                 print(f'  SUCCESS: Created {os.path.basename(mkv_file)} ({mkv_size / (1024*1024):.1f} MB)')
                 print(f'    - Video: {os.path.basename(video_file)}')
-                print(f'    - Attachments: {len(npz_files)} NPZ files')
-                
+                print(f'    - Attachments: {len(npz_to_attach)} NPZ file(s)')
+
+                # Remove source files after successful MKV creation
+                try:
+                    os.remove(video_file)
+                    for npz_file in npz_to_attach:
+                        os.remove(npz_file)
+                except Exception as e:
+                    print(f'  WARNING: Could not remove source files: {e}')
+
             except subprocess.TimeoutExpired:
                 print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
                 failed_count += 1
                 continue
-                
+
             except Exception as e:
                 print(f'  ERROR: Unexpected error creating MKV for {os.path.basename(video_file)}: {e}')
                 failed_count += 1
                 continue
-        
+
         # Summary
         print(f'\nMKV Packaging Summary:')
         print(f'  Successful: {successful_count}')
         print(f'  Failed: {failed_count}')
-        
+
         if failed_count > 0:
             print(f'\nWARNING: {failed_count} MKV file(s) could not be created.')
             print('  Check the error messages above for details.')

@@ -10,3 +10,6 @@ pims
 sparse
 av
 jinja2
+zstandard
+tqdm
+PyQt6
