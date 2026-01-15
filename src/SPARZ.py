@@ -1848,25 +1848,26 @@ class SPARZIP:
                                             
                             }
         elif codec == 'x264':
+            # Note: libx264 supports gray (8-bit) and gray10le (10-bit), NOT gray16le
             compression_levels = {0: {
                                                 'vcodec': 'libx264',
-                                                'pix_fmt': 'gray16le',
+                                                'pix_fmt': 'gray10le',
                                                 'crf': '0'
                                 },
                                 1:{
                                                 'vcodec': 'libx264',
                                                 'crf': '5',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 },
                                 2:{
                                                 'vcodec': 'libx264',
                                                 'crf': '15',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 },
                                 3:{
                                                 'vcodec': 'libx264',
                                                 'crf': '25',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 }
                 }
 
@@ -4513,21 +4514,21 @@ class UNSPARZ:
         @delayed
         def read_frames_h264():
             frames = []
+            dtype = None
             for frame in container.decode(video_stream):
-                # Assuming conversion directly to 'gray16le' is handled elsewhere or not necessary
-                y_plane = frame.planes[0]
-                y_data = np.frombuffer(y_plane, np.uint16)
-                y_data = y_data.reshape((frame.height, frame.width))
-                y_data_16bit = np.left_shift(y_data, 6)
-                frames.append(y_data_16bit)
-            return np.array(frames), y_data_16bit.dtype
-            # return np.stack(frames, axis=0) 
+                # For 10-bit h264 (gray10le), convert to gray16le for consistency
+                # PyAV handles the bit depth conversion
+                np_frame = frame.to_ndarray(format='gray16le')
+                if dtype is None:
+                    dtype = np_frame.dtype
+                frames.append(np_frame)
+            return np.array(frames), dtype
 
 
         # Get delayed frames and dtype
         if video_stream.codec.name == 'h264':
             print('H264 codec detected.')
-            frames_dtype = read_frames()
+            frames_dtype = read_frames_h264()
         else:
             print(f'{video_stream.codec.name} codec detected.')
             frames_dtype = read_frames()
