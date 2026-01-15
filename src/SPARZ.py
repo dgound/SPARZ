@@ -1183,25 +1183,26 @@ class SPARZIP:
                                             
                             }
         elif codec == 'x264':
+            # Note: libx264 supports gray (8-bit) and gray10le (10-bit), NOT gray16le
             compression_levels = {0: {
                                                 'vcodec': 'libx264',
-                                                'pix_fmt': 'gray16le',
+                                                'pix_fmt': 'gray10le',
                                                 'crf': '0'
                                 },
                                 1:{
                                                 'vcodec': 'libx264',
                                                 'crf': '5',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 },
                                 2:{
                                                 'vcodec': 'libx264',
                                                 'crf': '15',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 },
                                 3:{
                                                 'vcodec': 'libx264',
                                                 'crf': '25',
-                                                'pix_fmt': 'gray16le'
+                                                'pix_fmt': 'gray10le'
                                 }
                 }
 
@@ -2153,12 +2154,9 @@ class UNSPARZ:
         self.temp_dirs_to_cleanup = []
         
         # Check if we have MKV files (single-file format)
-        if path_encoded_bp1 and ('.mkv' in path_encoded_bp1 or glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))):
-            # Handle direct MKV path or find MKV files
-            if '.mkv' in path_encoded_bp1:
-                mkv_files = glob.glob(path_encoded_bp1)
-            else:
-                mkv_files = glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))
+        # Only treat as MKV if the path explicitly contains .mkv
+        if path_encoded_bp1 and '.mkv' in path_encoded_bp1.lower():
+            mkv_files = glob.glob(path_encoded_bp1)
             
             if mkv_files:
                 print(f'Detected MKV single-file format. Extracting components...')
@@ -2240,10 +2238,25 @@ class UNSPARZ:
                 self.temp_dirs_to_cleanup.append(temp_dir)
             
             try:
-                # Extract video stream
-                video_name = os.path.splitext(os.path.basename(mkv_file))[0] + '.mp4'
+                # Probe to detect codec and determine output container
+                probe = ffmpeg.probe(mkv_file)
+                video_codec = None
+                for stream in probe.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        video_codec = stream.get('codec_name', '')
+                        break
+
+                # Choose container based on codec
+                if video_codec and 'prores' in video_codec.lower():
+                    video_ext = '.mov'
+                elif video_codec and video_codec.lower() == 'ffv1':
+                    video_ext = '.avi'
+                else:
+                    video_ext = '.mp4'
+
+                video_name = os.path.splitext(os.path.basename(mkv_file))[0] + video_ext
                 video_path = os.path.join(temp_dir, video_name)
-                
+
                 # Check if already extracted
                 if os.path.exists(video_path):
                     print(f'Video already extracted: {video_name}')
@@ -2256,10 +2269,7 @@ class UNSPARZ:
                     extracted_video_paths.append(video_path)
                     print(f'Extracted video: {video_name}')
                 
-                # Extract attachments (NPZ files)
-                # First probe to get correct stream indices
-                probe = ffmpeg.probe(mkv_file)
-                
+                # Extract attachments (NPZ files) using probe data from above
                 # Find attachment streams and extract using ffmpeg command
                 attachment_count = 0
                 attachment_indices = []  # Store actual stream indices for attachments
@@ -2988,21 +2998,21 @@ class UNSPARZ:
         @delayed
         def read_frames_h264():
             frames = []
+            dtype = None
             for frame in container.decode(video_stream):
-                # Assuming conversion directly to 'gray16le' is handled elsewhere or not necessary
-                y_plane = frame.planes[0]
-                y_data = np.frombuffer(y_plane, np.uint16)
-                y_data = y_data.reshape((frame.height, frame.width))
-                y_data_16bit = np.left_shift(y_data, 6)
-                frames.append(y_data_16bit)
-            return np.array(frames), y_data_16bit.dtype
-            # return np.stack(frames, axis=0) 
+                # For 10-bit h264 (gray10le), convert to gray16le for consistency
+                # PyAV handles the bit depth conversion
+                np_frame = frame.to_ndarray(format='gray16le')
+                if dtype is None:
+                    dtype = np_frame.dtype
+                frames.append(np_frame)
+            return np.array(frames), dtype
 
 
         # Get delayed frames and dtype
         if video_stream.codec.name == 'h264':
             print('H264 codec detected.')
-            frames_dtype = read_frames()
+            frames_dtype = read_frames_h264()
         else:
             print(f'{video_stream.codec.name} codec detected.')
             frames_dtype = read_frames()
