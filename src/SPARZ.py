@@ -27,8 +27,7 @@ from dask.diagnostics import ProgressBar
 import zstandard as zstd
 from statsmodels.stats.power import TTestIndPower
 import av
-import concurrent.futures
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List
 # import joblib
 
 #%%
@@ -1356,51 +1355,67 @@ class SPARZIP:
 
     def process_images(self):
         print('Processing images...')
+        # Step 1: Find peaks in plane 1
+        map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
 
-        if self.single_plane:
-            print('Single plane - using fused processing')
+        if self.single_plane == False:
+            assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
+            # Step 2: Find peaks in plane 2
+            map2 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp2]
+            # Step 3: Union of peaks from both planes
+            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[0][0,:,:].shape, dtype='int16') for i in range(len(map1))]
+            # Step 4: Expand peaks with kernel
+            map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
+            # Step 5: Apply mask to extract ROI values
+            try:
+                sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+                sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
+            except TypeError:
+                def apply_where(kernel, img):
+                    return da.where(kernel, img, 0)
+                sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+                sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
+
             if self.peak_process == 'median':
                 print('Applying median patch...')
-                self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
+                new_bp1 = []
+                for block in self.bp1:
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1
 
-            # Fused single-plane processing: peaks -> mask -> kernel -> sparse in one operation
-            result = [blck.map_blocks(self._process_frame_to_sparse_single, dtype=object)
-                     for blck in self.bp1]
+                new_bp2 = []
+                for block in self.bp2:
+                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp2 = new_bp2
+
             print('Done.')
-            return result, None
+            # Step 6: Convert to sparse at the end
+            return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
 
-        # Biplane processing - using fused operations
-        print('Biplane processing - using fused operations')
-        assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
+        # Single plane processing
+        print('Single plane')
+        def add_mask(peaks):
+            tmp = np.zeros(self.bp1[0][0,:,:].shape)
+            tmp[peaks[:, 0], peaks[:, 1]] = 1
+            return tmp
+        map_mask = [b.map_blocks(lambda x: add_mask(x), dtype='int16') for b in map1]
+        map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
+        try:
+            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
+        except TypeError:
+            def apply_where(kernel, img):
+                return da.where(kernel, img, 0)
+            sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
 
         if self.peak_process == 'median':
             print('Applying median patch...')
-            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
-            self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
-
-        # Fused biplane processing: process both planes together for peak union
-        sp1_list = []
-        sp2_list = []
-
-        for i in range(len(self.bp1)):
-            # Use da.map_blocks with both arrays - fused peak finding and sparse conversion
-            sp1 = da.map_blocks(
-                self._process_biplane_to_sparse_bp1,
-                self.bp1[i], self.bp2[i],
-                dtype=object,
-                drop_axis=None
-            )
-            sp2 = da.map_blocks(
-                self._process_biplane_to_sparse_bp2,
-                self.bp1[i], self.bp2[i],
-                dtype=object,
-                drop_axis=None
-            )
-            sp1_list.append(sp1)
-            sp2_list.append(sp2)
+            new_bp1 = []
+            for block in self.bp1:
+                new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+            self.bp1 = new_bp1
 
         print('Done.')
-        return sp1_list, sp2_list
+        return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
 
     def extract_metadata(self):
         """
@@ -3101,17 +3116,17 @@ class SPARZIP:
                 print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
                 failed_count += 1
                 continue
-                
+
             except Exception as e:
                 print(f'  ERROR: Unexpected error creating MKV for {os.path.basename(video_file)}: {e}')
                 failed_count += 1
                 continue
-        
+
         # Summary
         print(f'\nMKV Packaging Summary:')
         print(f'  Successful: {successful_count}')
         print(f'  Failed: {failed_count}')
-        
+
         if failed_count > 0:
             print(f'\nWARNING: {failed_count} MKV file(s) could not be created.')
             print('  Check the error messages above for details.')
