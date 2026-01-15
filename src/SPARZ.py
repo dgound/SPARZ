@@ -2999,12 +2999,36 @@ class UNSPARZ:
         def read_frames_h264():
             frames = []
             dtype = None
-            for frame in container.decode(video_stream):
-                # For 10-bit h264 (gray10le), convert to gray16le for consistency
-                # PyAV handles the bit depth conversion
-                np_frame = frame.to_ndarray(format='gray16le')
+            for i, frame in enumerate(container.decode(video_stream)):
+                # Debug: print frame format on first frame
+                if i == 0:
+                    print(f'  H264 frame format: {frame.format.name}, size: {frame.width}x{frame.height}')
+
+                # h264 is typically encoded as YUV even if input was grayscale
+                # Extract Y (luma) plane and scale to 16-bit
+                if 'yuv' in frame.format.name:
+                    # Get Y plane (luma) - this contains the grayscale data
+                    y_plane = frame.planes[0]
+                    # Determine bit depth from format name
+                    if '10' in frame.format.name:
+                        # 10-bit YUV: Y plane is uint16 with 10 bits of data
+                        y_data = np.frombuffer(y_plane, dtype=np.uint16).reshape(frame.height, y_plane.line_size // 2)
+                        # Crop to actual width (line_size may include padding)
+                        y_data = y_data[:, :frame.width]
+                        # Scale 10-bit to 16-bit (left shift by 6)
+                        np_frame = (y_data.astype(np.uint16) << 6)
+                    else:
+                        # 8-bit YUV
+                        y_data = np.frombuffer(y_plane, dtype=np.uint8).reshape(frame.height, y_plane.line_size)
+                        y_data = y_data[:, :frame.width]
+                        np_frame = (y_data.astype(np.uint16) << 8)
+                else:
+                    # Native grayscale format
+                    np_frame = frame.to_ndarray(format='gray16le')
+
                 if dtype is None:
                     dtype = np_frame.dtype
+                    print(f'  H264 decoded dtype: {dtype}, range: [{np_frame.min()}, {np_frame.max()}]')
                 frames.append(np_frame)
             return np.array(frames), dtype
 
