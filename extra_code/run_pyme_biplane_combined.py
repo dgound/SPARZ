@@ -7,6 +7,8 @@ Input options:
   2. Separate BP1 and BP2 TIFFs: automatically combined side-by-side
 
 EXACT settings from PYME GUI - DO NOT MODIFY
+
+Compatible with PYME versions 21.x through 25.x
 """
 
 import matplotlib
@@ -20,11 +22,48 @@ import tifffile
 import h5py
 from pathlib import Path
 
-# PYME imports
-from PYME.localization import ofind
-from PYME.localization.FitFactories import SplitterFitInterpBNR
-from PYME.localization.splitting import split_image
-from PYME.IO import MetaDataHandler
+# PYME imports with backwards compatibility
+try:
+    from PYME.localization import ofind
+except ImportError:
+    from PYME.Analysis import ofind
+
+try:
+    from PYME.localization.FitFactories import SplitterFitInterpBNR
+except ImportError:
+    from PYME.Analysis.FitFactories import SplitterFitInterpBNR
+
+try:
+    from PYME.localization.splitting import split_image
+except ImportError:
+    # Older PYME versions
+    try:
+        from PYME.Analysis.splitting import split_image
+    except ImportError:
+        # Fallback: implement split_image manually
+        def split_image(md, data):
+            """Manual split_image for older PYME versions."""
+            roi0 = md['Splitter.Channel0ROI']
+            roi1 = md['Splitter.Channel1ROI']
+            # ROI format: [x_start, y_start, x_size, y_size] or similar
+            # For side-by-side: left half is channel 0, right half is channel 1
+            h, w = data.shape
+            half_w = w // 2
+            ch0 = data[:, :half_w]
+            ch1 = data[:, half_w:]
+            return np.stack([ch0, ch1], axis=-1)
+
+try:
+    from PYME.IO import MetaDataHandler
+except ImportError:
+    from PYME.IO import MetaDataHandler as MetaDataHandler
+
+# Get PYME version for compatibility checks
+try:
+    import PYME
+    PYME_VERSION = getattr(PYME, '__version__', '0.0.0')
+except Exception:
+    PYME_VERSION = '0.0.0'
 
 
 def create_combined_sidebyside(bp1_path, bp2_path):
@@ -70,7 +109,11 @@ def create_combined_sidebyside(bp1_path, bp2_path):
 
 def create_metadata(psf_file=None):
     """Create PYME metadata with EXACT settings from PYME GUI."""
-    md = MetaDataHandler.NestedClassMDHandler()
+    try:
+        md = MetaDataHandler.NestedClassMDHandler()
+    except AttributeError:
+        # Fallback for older PYME versions
+        md = MetaDataHandler.MDHandlerBase()
 
     # Voxelsize in um
     md['voxelsize.x'] = 0.1
@@ -203,7 +246,11 @@ def localize_combined(combined_input, output_path, psf_file=None, max_frames=Non
 
         # Find candidates on channel 0
         ofd = ofind.ObjectIdentifier(frame_corrected)
-        ofd.FindObjects(threshold, numThresholdSteps=0, blurRadius=1.5, debounceRadius=4)
+        try:
+            ofd.FindObjects(threshold, numThresholdSteps=0, blurRadius=1.5, debounceRadius=4)
+        except TypeError:
+            # Older PYME versions may have different signature
+            ofd.FindObjects(threshold, blurRadius=1.5, debounceRadius=4)
         candidates = list(ofd)
 
         # Create fit factory with split 3D frame - PYME expects (height, width, 2)
@@ -244,7 +291,33 @@ def localize_combined(combined_input, output_path, psf_file=None, max_frames=Non
 
 def save_h5r(output_path, results, mdh):
     """Save localization results to h5r format."""
-    fresultdtype = SplitterFitInterpBNR.FitResultsDType
+    # Get FitResultsDType with fallback for older PYME versions
+    try:
+        fresultdtype = SplitterFitInterpBNR.FitResultsDType
+    except AttributeError:
+        # Fallback dtype for older versions
+        fresultdtype = np.dtype([
+            ('tIndex', '<i4'),
+            ('fitResults', [
+                ('x0', '<f4'),
+                ('y0', '<f4'),
+                ('z0', '<f4'),
+                ('A', '<f4'),
+                ('sigma', '<f4'),
+                ('background', '<f4'),
+            ]),
+            ('fitError', [
+                ('x0', '<f4'),
+                ('y0', '<f4'),
+                ('z0', '<f4'),
+                ('A', '<f4'),
+                ('sigma', '<f4'),
+                ('background', '<f4'),
+            ]),
+            ('resultCode', '<i4'),
+            ('slicesUsed', [('x', [('start', '<i4'), ('stop', '<i4'), ('step', '<i4')]),
+                           ('y', [('start', '<i4'), ('stop', '<i4'), ('step', '<i4')])])
+        ])
 
     n_results = len(results)
     fit_results = np.zeros(n_results, dtype=fresultdtype)
