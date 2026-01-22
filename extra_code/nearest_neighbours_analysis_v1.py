@@ -32,7 +32,7 @@ from sklearn.neighbors import NearestNeighbors
 # select the path of the data folder
 # path = '/Volumes/T7/compression_data/data_compression_localizations/Nir_et_al/'
 # path =  '/Volumes/T7/compression_data/data_compression_localizations/sparz/sparz_grid_search/'
-path = '/Users/alioutas/Dropbox/Dropbox (HMS)/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data'
+path = '/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/'
 
 # find all .h5r files within the folder
 
@@ -50,7 +50,7 @@ max_accuracy = 100000
 # max_accuracy = 1000000
 
 # Distance threshold to calculate nearest neighbours, we used 40nm because this is the resolution of SMLM method
-dist_threshold = 40
+dist_threshold = 100
 
 #%% Define all functions
 
@@ -281,11 +281,11 @@ def compute_nearest_neighbours(df1, df2, n_neighbors=1, algorithm='ball_tree'):
 
 
 # #%%
-# # Determine the number of available cores and use % of them for the NN analysis
-# num_cores = multiprocessing.cpu_count() -2
-# num_cores = int(round(num_cores * 0.9, 0))
+# Determine the number of available cores and use % of them for the NN analysis
+num_cores = multiprocessing.cpu_count() -2
+num_cores = int(round(num_cores * 0.9, 0))
 
-# print('Will be using',num_cores, 'cores')
+print('Will be using',num_cores, 'cores')
 
 #%%
 # load raw file
@@ -422,8 +422,11 @@ df_stats_out.to_csv(os.path.join(path+ '/output/', data_name+ date +'_'+'_metric
 
 #%%
 
-df_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date+'_'+codec_label+'_distances.csv'))
-df_stats_out = pd.read_csv(os.path.join(path+ '/output/', data_name+ date +'_'+codec_label+'_metrics.csv'))
+# df_out = pd.read_csv(os.path.join(path+ 'output/', data_name+ date+'_'+codec_label+'_distances.csv'))
+df_out = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__distances.csv')
+# df_stats_out = pd.read_csv(os.path.join(path+ 'output/', data_name+ date +'_'+codec_label+'_metrics.csv'))
+df_stats_out = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compression/data_compression_localizations/figure_1_data/synth_tubulin_data/output/synMT_vs_rawTP_20240501__metrics.csv')
+
 
 # %%
 # plot kdeplot as a histogram of the distances
@@ -705,7 +708,7 @@ def join_on_distance_kdtree_all_matches(df1, df2, r, cols=['x', 'y', 'z']):
 
 
 #%%
-r = 40
+r = 100
 # %%
 raw_locs = join_on_distance_kdtree(raw, locs, r = r, cols = ['fitResults_x0', 'fitResults_y0', 'fitResults_z0'])
 # %%

@@ -48,6 +48,7 @@ nn_distances = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_co
 nn_distances['label'] = [x[0] for x in nn_distances['label'].str.split('_')]
 # replace 'sparz' with 'SPARZ'
 nn_distances['label'] = nn_distances['label'].replace('sparz', 'SPARZ')
+nn_distances['label'] = nn_distances['label'].replace('sparzffv1', 'SPARZ lossless')
 nn_distances['label'] = nn_distances['label'].replace('AV1', 'av1')
 nn_distances['color_palette'] = nn_distances['label'].map(color_palette)
 
@@ -83,6 +84,7 @@ jaccard = pd.read_csv(path + 'data_compression/data_compression_localizations/fi
 jaccard = jaccard[jaccard['metric'] == 'Jaccard']
 jaccard['label'] = [x[0] for x in jaccard['label'].str.split('_')]
 jaccard['label'] = jaccard['label'].replace('sparz', 'SPARZ')
+jaccard['label'] = jaccard['label'].replace('sparzffv1', 'SPARZ lossless')
 jaccard['label'] = jaccard['label'].replace('AV1', 'av1')
 jaccard['color_palette'] = jaccard['label'].map(color_palette)
 

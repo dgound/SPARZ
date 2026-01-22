@@ -44,6 +44,7 @@ L2_diff = pd.read_csv('/Users/alioutas/HMS Dropbox/Antonios Lioutas/data_compres
 L2_diff['label'] = L2_diff['compression_method'].str.split('_').str[0]
 L2_diff['label'] = L2_diff['label'].replace('AV1', 'av1')
 L2_diff['label'] = L2_diff['label'].replace('sparz', 'SPARZ')
+L2_diff['label'] = L2_diff['label'].replace('sparzffv1', 'SPARZ lossless')
 
 # %%
 # make a barplot of the L2 distance labeled Ralative spatial density error (vs. raw) 
