@@ -5,6 +5,8 @@ Usage:
   python sparz_grid-search.py --bp1 /path/to/bp1.tif --bp2 /path/to/bp2.tif \
       --psf /path/to/psf.tif --output /path/to/output --sparz-src /path/to/SPARZ/src \
       --localization-script /path/to/run_pyme_biplane_combined.py
+
+Compatible with scikit-image 0.16+ and older versions.
 """
 
 import os
@@ -12,11 +14,72 @@ import sys
 import json
 import argparse
 import numpy as np
-import pandas as pd
 from pathlib import Path
-from tqdm import tqdm
-from skimage.metrics import structural_similarity as ssim
 import tifffile
+
+# Optional pandas - fall back to csv module
+try:
+    import pandas as pd
+    HAS_PANDAS = True
+except ImportError:
+    import csv
+    HAS_PANDAS = False
+
+# Optional tqdm - fall back to simple progress tracker
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    class tqdm:
+        """Simple fallback progress tracker when tqdm is not installed."""
+        def __init__(self, iterable=None, total=None, **kwargs):
+            self.iterable = iterable
+            self.total = total
+            self.n = 0
+        def __iter__(self):
+            return iter(self.iterable) if self.iterable else iter([])
+        def update(self, n=1):
+            self.n += n
+        def set_postfix(self, *args, **kwargs):
+            pass
+        def close(self):
+            pass
+
+# SSIM: scikit-image >= 0.16 uses skimage.metrics, older uses skimage.measure
+try:
+    from skimage.metrics import structural_similarity as ssim
+except ImportError:
+    try:
+        from skimage.measure import compare_ssim as ssim
+    except ImportError:
+        # Fallback: simple MSE-based similarity
+        def ssim(img1, img2, data_range=None):
+            mse = np.mean((img1 - img2) ** 2)
+            if data_range is None:
+                data_range = max(img1.max(), img2.max()) - min(img1.min(), img2.min())
+            if data_range == 0:
+                return 1.0
+            return 1.0 - (mse / (data_range ** 2))
+
+
+def import_sparz(sparz_src):
+    """Import SPARZ with backwards compatibility for different versions.
+
+    SPARZ v0.5+ uses UNSPARZ, older versions use SPARUNZIP.
+    """
+    import sys
+    sys.path.insert(0, str(sparz_src))
+
+    from SPARZ import SPARZIP
+
+    # Version detection: UNSPARZ (>=0.5) vs SPARUNZIP (<0.5)
+    try:
+        from SPARZ import UNSPARZ
+        return SPARZIP, UNSPARZ, ">=0.5"
+    except ImportError:
+        from SPARZ import SPARUNZIP
+        return SPARZIP, SPARUNZIP, "<0.5"
 
 
 # Grid search parameters
@@ -109,9 +172,9 @@ def run_grid_search(bp1_path, bp2_path, psf_path, output_dir, sparz_src, localiz
     ref_locs = locs_to_array(ref_results)
     print(f"  Reference localizations: {len(ref_locs)}")
 
-    # Import SPARZ
-    sys.path.insert(0, str(sparz_src))
-    from SPARZ import SPARZIP, UNSPARZ
+    # Import SPARZ with version detection
+    SPARZIP, UNSPARZ_CLASS, sparz_version = import_sparz(sparz_src)
+    print(f"  Using SPARZ version: {sparz_version}")
 
     # Grid search
     results = []
@@ -130,33 +193,41 @@ def run_grid_search(bp1_path, bp2_path, psf_path, output_dir, sparz_src, localiz
                 uncomp_dir.mkdir(parents=True, exist_ok=True)
 
                 try:
-                    # Compress
-                    z = SPARZIP(
-                        path_image_files1=str(bp1_path),
-                        stem=STEM,
-                        output_path=str(run_dir),
-                        path_image_files2=str(bp2_path),
-                        relative_threshold=thresh,
-                        kernel_size=kernel
-                    )
-                    z.run(codec=CODEC, compression_level=level)
-                    comp_size = get_compressed_size(run_dir)
+                    # Check if decompressed files already exist
+                    dec_files = sorted(uncomp_dir.glob('*.tif*'))
 
-                    # Decompress
-                    u = UNSPARZ(
-                        path_sparse_bp1=str(run_dir / f'{base1}.npz'),
-                        path_encoded_bp1=str(run_dir / f'{base1}_compression_level_{level}.mp4'),
-                        stem=STEM,
-                        output_path=str(uncomp_dir),
-                        path_sparse_bp2=str(run_dir / f'{base2}.npz'),
-                        path_encoded_bp2=str(run_dir / f'{base2}_compression_level_{level}.mp4'),
-                        use_roi=True,
-                        chunk_size=10
-                    )
-                    u.run()
+                    if len(dec_files) >= 2:
+                        # Skip compression/decompression, use existing files
+                        comp_size = get_compressed_size(run_dir)
+                        print(f"  Skipping {run_name} - decompressed files exist")
+                    else:
+                        # Compress
+                        z = SPARZIP(
+                            path_image_files1=str(bp1_path),
+                            stem=STEM,
+                            output_path=str(run_dir),
+                            path_image_files2=str(bp2_path),
+                            relative_threshold=thresh,
+                            kernel_size=kernel
+                        )
+                        z.run(codec=CODEC, compression_level=level)
+                        comp_size = get_compressed_size(run_dir)
 
-                    # Load decompressed
-                    dec_files = sorted(uncomp_dir.glob('*.tif'))
+                        # Decompress
+                        u = UNSPARZ_CLASS(
+                            path_sparse_bp1=str(run_dir / f'{base1}.npz'),
+                            path_encoded_bp1=str(run_dir / f'{base1}_compression_level_{level}.mp4'),
+                            stem=STEM,
+                            output_path=str(uncomp_dir),
+                            path_sparse_bp2=str(run_dir / f'{base2}.npz'),
+                            path_encoded_bp2=str(run_dir / f'{base2}_compression_level_{level}.mp4'),
+                            use_roi=True,
+                            chunk_size=10
+                        )
+                        u.run()
+
+                        # Reload decompressed files
+                        dec_files = sorted(uncomp_dir.glob('*.tif*'))
                     if len(dec_files) >= 2:
                         recon_bp1 = load_tiff_stack(dec_files[0])
                         recon_bp2 = load_tiff_stack(dec_files[1])
@@ -208,25 +279,43 @@ def run_grid_search(bp1_path, bp2_path, psf_path, output_dir, sparz_src, localiz
     pbar.close()
 
     # Save results
-    df = pd.DataFrame(results)
-    df.to_csv(output_dir / 'grid_search_results.csv', index=False)
-    with open(output_dir / 'grid_search_results.json', 'w') as f:
+    csv_path = output_dir / 'grid_search_results.csv'
+    json_path = output_dir / 'grid_search_results.json'
+
+    if HAS_PANDAS:
+        df = pd.DataFrame(results)
+        df.to_csv(csv_path, index=False)
+    else:
+        # Fallback: use csv module
+        if results:
+            fieldnames = list(results[0].keys())
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(results)
+
+    with open(json_path, 'w') as f:
         json.dump(results, f, indent=2)
-    print(f"\nSaved to: {output_dir / 'grid_search_results.csv'}")
-    print(f"Saved to: {output_dir / 'grid_search_results.json'}")
+
+    print(f"\nSaved to: {csv_path}")
+    print(f"Saved to: {json_path}")
 
     # Summary
     print("\n" + "="*60)
     print("SUMMARY")
     print("="*60)
     for level in COMPRESSION_LEVELS:
-        ldf = df[df['compression_level'] == level]
-        if 'ssim_mean' in ldf and not ldf['ssim_mean'].isna().all():
-            print(f"Level {level}: size={ldf['file_size_pct'].mean():.1f}%, "
-                  f"SSIM={ldf['ssim_mean'].mean():.4f}, "
-                  f"Jaccard={ldf['jaccard'].mean():.4f}")
+        level_results = [r for r in results if r.get('compression_level') == level]
+        if level_results:
+            sizes = [r['file_size_pct'] for r in level_results if 'file_size_pct' in r]
+            ssims = [r['ssim_mean'] for r in level_results if r.get('ssim_mean') is not None]
+            jaccards = [r['jaccard'] for r in level_results if r.get('jaccard') is not None]
+            if sizes and ssims and jaccards:
+                print(f"Level {level}: size={np.mean(sizes):.1f}%, "
+                      f"SSIM={np.mean(ssims):.4f}, "
+                      f"Jaccard={np.mean(jaccards):.4f}")
 
-    return df
+    return results
 
 
 def main():
