@@ -13,3 +13,5 @@ jinja2
 zstandard
 tqdm
 PyQt6
+statsmodels
+ffmpeg-python
