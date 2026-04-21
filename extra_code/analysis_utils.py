@@ -405,26 +405,21 @@ def get_dat_dimensions(folder_path):
     except KeyError:
         raise ValueError("data.json does not contain the expected ['value']['Image']['DimX/DimY'] keys.")
 
-def calculate_ssim_dat_folder(original_folder, decompressed_folder):
+def calculate_ssim_dat_folder(original_folder, decompressed_folder, fixed_data_range=23000):
     """
-    Calculate SSIM for all .dat files in two folders.
+    Calculate SSIM for all .dat files in two folders using a FIXED data range.
     
     Parameters:
     -----------
     original_folder : str
         Path to folder with original .dat files (must contain data.json)
-    decompressed_folder : str
+    decompressed_folder : strs
         Path to folder with decompressed .dat files
-        
-    Returns:
-    --------
-    list
-        List of dictionaries with SSIM results per file
+    fixed_data_range : int
+        The absolute maximum pixel value of the camera (e.g., 16383 for 14-bit, 65535 for 16-bit)
     """
-    # 1. Get image dimensions from the original folder's json
     dim_x, dim_y = get_dat_dimensions(original_folder)
     
-    # 2. Get matched lists of .dat files
     orig_files = natsorted([f for f in os.listdir(original_folder) if f.endswith('.dat')])
     comp_files = natsorted([f for f in os.listdir(decompressed_folder) if f.endswith('.dat')])
     
@@ -432,41 +427,32 @@ def calculate_ssim_dat_folder(original_folder, decompressed_folder):
     
     for orig_file in orig_files:
         if orig_file not in comp_files:
-            continue  # Skip if the file wasn't decompressed
+            continue
             
         orig_path = os.path.join(original_folder, orig_file)
         comp_path = os.path.join(decompressed_folder, orig_file)
         
-        # Load the raw binary data
         orig_data = np.fromfile(orig_path, dtype=np.uint16)
         comp_data = np.fromfile(comp_path, dtype=np.uint16)
         
-        # Calculate how many frames are in this specific file
         frames = len(orig_data) // (dim_x * dim_y)
-        
-        # Reshape into a 3D array: (frames, Y, X)
         orig_frames = orig_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
         comp_frames = comp_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
         
-        # Calculate SSIM for each frame in the file
         file_ssim_scores = []
         for i in range(frames):
             orig_img = orig_frames[i]
             comp_img = comp_frames[i]
             
-            # Find data range (max - min). Prevent division by zero on blank frames
-            data_range = comp_img.max() - comp_img.min()
-            if data_range == 0:
-                data_range = 65535
-                
-            score = ssim(orig_img, comp_img, data_range=data_range)
+            # FIX: Use the fixed, mathematically sound data range!
+            score = ssim(orig_img, comp_img, data_range=fixed_data_range)
             file_ssim_scores.append(score)
             
         if file_ssim_scores:
             ssim_results.append({
                 'original_file': orig_file,
                 'compressed_file': orig_file,
-                'ssim': np.median(file_ssim_scores) # Store the median SSIM for this file chunk
+                'ssim': np.median(file_ssim_scores) 
             })
             
     return ssim_results
