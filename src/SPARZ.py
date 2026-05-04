@@ -3126,114 +3126,118 @@ class UNSPARZ:
         # Initialize temp directory tracking
         self.temp_dirs_to_cleanup = []
 
-        # Residual configuration
-        self.use_residuals = use_residuals
-        self.path_residual_bp1 = path_residual_bp1
-        self.path_residual_bp2 = path_residual_bp2
-        # Set use_roi early so _validate_mkv_sidecars sees the right value.
-        self.use_roi = use_roi
+        try:
+            # Residual configuration
+            self.use_residuals = use_residuals
+            self.path_residual_bp1 = path_residual_bp1
+            self.path_residual_bp2 = path_residual_bp2
+            # Set use_roi early so _validate_mkv_sidecars sees the right value.
+            self.use_roi = use_roi
 
-        # Check if we have MKV files (single-file format)
-        self._mkv_extracted = False
-        self._codec_bp1 = None
-        self._codec_bp2 = None
-        self.path_metadata_bp1 = None
-        self.path_metadata_bp2 = None
-        if self._looks_like_mkv_input(path_encoded_bp1):
-            mkv_files = self._resolve_mkv_files(path_encoded_bp1)
-            if not mkv_files:
-                raise ValueError("MKV files not found")
-            print(f'Detected MKV single-file format. Extracting components...')
-            self.path_encoded_bp1, self.path_encoded_bp2 = self.extract_from_mkv(mkv_files, path_encoded_bp2)
-            # extract_from_mkv populated path_sparse_<plane> / path_residual_<plane>
-            # and self._codec_<plane>.
-            path_sparse_bp1 = self.path_sparse_bp1
-            path_sparse_bp2 = self.path_sparse_bp2
-            self._mkv_extracted = True
-            # Catch BP1/BP2 count mismatches before we run any sidecar checks.
-            self._validate_count_consistency()
-            # Fail fast on missing required sidecars rather than passing None downstream.
-            self._validate_mkv_sidecars()
-        else:
-            # Traditional separate files
-            self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
-            self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
-            # Catch obvious user mistakes in the non-MKV path too.
-            self._validate_count_consistency()
+            # Check if we have MKV files (single-file format)
+            self._mkv_extracted = False
+            self._codec_bp1 = None
+            self._codec_bp2 = None
+            self.path_metadata_bp1 = None
+            self.path_metadata_bp2 = None
+            if self._looks_like_mkv_input(path_encoded_bp1):
+                mkv_files = self._resolve_mkv_files(path_encoded_bp1)
+                if not mkv_files:
+                    raise ValueError("MKV files not found")
+                print(f'Detected MKV single-file format. Extracting components...')
+                self.path_encoded_bp1, self.path_encoded_bp2 = self.extract_from_mkv(mkv_files, path_encoded_bp2)
+                # extract_from_mkv populated path_sparse_<plane> / path_residual_<plane>
+                # and self._codec_<plane>.
+                path_sparse_bp1 = self.path_sparse_bp1
+                path_sparse_bp2 = self.path_sparse_bp2
+                self._mkv_extracted = True
+                # Catch BP1/BP2 count mismatches before we run any sidecar checks.
+                self._validate_count_consistency()
+                # Fail fast on missing required sidecars rather than passing None downstream.
+                self._validate_mkv_sidecars()
+            else:
+                # Traditional separate files
+                self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
+                self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+                # Catch obvious user mistakes in the non-MKV path too.
+                self._validate_count_consistency()
 
-        self.output_format = output_format.lower()
-        if self.output_format not in ['tiff', 'dat']:
-            raise ValueError("output_format must be either 'tiff' or 'dat'")
+            self.output_format = output_format.lower()
+            if self.output_format not in ['tiff', 'dat']:
+                raise ValueError("output_format must be either 'tiff' or 'dat'")
 
-        if not self.path_encoded_bp1:
-            raise ValueError("No encoded video files were resolved from path_encoded_bp1")
+            if not self.path_encoded_bp1:
+                raise ValueError("No encoded video files were resolved from path_encoded_bp1")
 
-        first_ext = os.path.splitext(self.path_encoded_bp1[0])[1]
-        # zstd-encoded image stacks have no streaming-decode path; they always
-        # use the legacy eager Dask flow.
-        self.streaming = bool(streaming) and first_ext != '.zst'
+            first_ext = os.path.splitext(self.path_encoded_bp1[0])[1]
+            # zstd-encoded image stacks have no streaming-decode path; they always
+            # use the legacy eager Dask flow.
+            self.streaming = bool(streaming) and first_ext != '.zst'
 
-        if first_ext == '.zst':
-            if self.use_roi:
-                print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
-                self.use_roi = False
-            self.encoded_bp1, self.encoded_bp2 = self.decode_zst(self.path_encoded_bp1, self.path_encoded_bp2)
-        elif self.streaming:
-            # Streaming path: only probe shape/dtype; never decode frames in __init__.
-            self.encoded_bp1 = [_LazyVideoProbe(p) for p in self.path_encoded_bp1]
-            self.encoded_bp2 = ([_LazyVideoProbe(p) for p in self.path_encoded_bp2]
-                                if self.path_encoded_bp2 else None)
-        else:
-            self.encoded_bp1, self.encoded_bp2 = self.decode(self.path_encoded_bp1, self.path_encoded_bp2)
+            if first_ext == '.zst':
+                if self.use_roi:
+                    print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
+                    self.use_roi = False
+                self.encoded_bp1, self.encoded_bp2 = self.decode_zst(self.path_encoded_bp1, self.path_encoded_bp2)
+            elif self.streaming:
+                # Streaming path: only probe shape/dtype; never decode frames in __init__.
+                self.encoded_bp1 = [_LazyVideoProbe(p) for p in self.path_encoded_bp1]
+                self.encoded_bp2 = ([_LazyVideoProbe(p) for p in self.path_encoded_bp2]
+                                    if self.path_encoded_bp2 else None)
+            else:
+                self.encoded_bp1, self.encoded_bp2 = self.decode(self.path_encoded_bp1, self.path_encoded_bp2)
 
-        # Track ROI sparse paths for later use (streaming uses them per chunk).
-        self._path_sparse_bp1_resolved = path_sparse_bp1
-        self._path_sparse_bp2_resolved = path_sparse_bp2
+            # Track ROI sparse paths for later use (streaming uses them per chunk).
+            self._path_sparse_bp1_resolved = path_sparse_bp1
+            self._path_sparse_bp2_resolved = path_sparse_bp2
 
-        # Optional exact-reconstruction residual sidecars.
-        if self.use_residuals and first_ext != '.zst':
-            self._autodetect_residual_paths()
-            if not self.streaming:
-                # Eager Dask apply only; streaming applies per chunk in run().
-                self._apply_residuals_to_encoded()
+            # Optional exact-reconstruction residual sidecars.
+            if self.use_residuals and first_ext != '.zst':
+                self._autodetect_residual_paths()
+                if not self.streaming:
+                    # Eager Dask apply only; streaming applies per chunk in run().
+                    self._apply_residuals_to_encoded()
 
-        self.shapes = [x.shape[:3] for x in self.encoded_bp1]
+            self.shapes = [x.shape[:3] for x in self.encoded_bp1]
 
-        # Eager (streaming=False) load_sparse cannot deal with per-video None
-        # gaps, so adjust use_roi here based on the codec mix. This must run
-        # before load_sparse below.
-        if self.use_roi and not self.streaming and self._mkv_extracted:
-            self._adjust_roi_for_eager_mode()
-            # _adjust_roi_for_eager_mode may have flipped use_roi off.
-            path_sparse_bp1 = self.path_sparse_bp1
-            path_sparse_bp2 = self.path_sparse_bp2
+            # Eager (streaming=False) load_sparse cannot deal with per-video None
+            # gaps, so adjust use_roi here based on the codec mix. This must run
+            # before load_sparse below.
+            if self.use_roi and not self.streaming and self._mkv_extracted:
+                self._adjust_roi_for_eager_mode()
+                # _adjust_roi_for_eager_mode may have flipped use_roi off.
+                path_sparse_bp1 = self.path_sparse_bp1
+                path_sparse_bp2 = self.path_sparse_bp2
 
-        if self.use_roi and not self.streaming:
-            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
-            self.processed_bp1, self.processed_bp2 = self.process_frames()
-        else:
-            # Streaming: ROI is loaded coords-only per video at run() time.
-            self.sparse_bp1 = None
-            self.sparse_bp2 = None
-            self.processed_bp1 = None
-            self.processed_bp2 = None
-        self.stem = stem
-        self.num_workers = num_workers
-        self.num_dask_workers = num_dask_workers
-        if output_path[-1] != '/':
-            self.output_path = output_path+"/"
-        else:
-            self.output_path = output_path
-        self.chunk_size = chunk_size
-        
-        # Extract metadata from encoded files for preservation
-        self.metadata_bp1, self.metadata_bp2 = self.load_original_metadata()
-        
-        # Restore numeric values
-        if self.metadata_bp1:
-            self.metadata_bp1 = [restore_numeric_values(meta) for meta in self.metadata_bp1]
-        if self.metadata_bp2:
-            self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
+            if self.use_roi and not self.streaming:
+                self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
+                self.processed_bp1, self.processed_bp2 = self.process_frames()
+            else:
+                # Streaming: ROI is loaded coords-only per video at run() time.
+                self.sparse_bp1 = None
+                self.sparse_bp2 = None
+                self.processed_bp1 = None
+                self.processed_bp2 = None
+            self.stem = stem
+            self.num_workers = num_workers
+            self.num_dask_workers = num_dask_workers
+            if output_path[-1] != '/':
+                self.output_path = output_path+"/"
+            else:
+                self.output_path = output_path
+            self.chunk_size = chunk_size
+
+            # Extract metadata from encoded files for preservation
+            self.metadata_bp1, self.metadata_bp2 = self.load_original_metadata()
+
+            # Restore numeric values
+            if self.metadata_bp1:
+                self.metadata_bp1 = [restore_numeric_values(meta) for meta in self.metadata_bp1]
+            if self.metadata_bp2:
+                self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
+        except Exception:
+            self.cleanup_temp_directories()
+            raise
 
     def _extract_mkv_attachments(self, mkv_file, temp_dir):
         """Extract every attachment in a single MKV into ``temp_dir``.
@@ -3364,24 +3368,13 @@ class UNSPARZ:
         except Exception as e:
             print(f'Unexpected error extracting from MKV {mkv_file}: {e}')
 
-        # Match sidecars by stem in the temp dir first, then the MKV dir.
+        # MKV inputs are self-contained: automatic sidecars must come from
+        # attachments extracted into this fresh per-MKV directory. Looking next
+        # to the MKV risks binding stale files from an older run/package.
         sidecars = find_matching_sidecars_for_video(video_path, search_dir=temp_dir)
         metadata_sidecars = find_metadata_sidecars_for_video(
             video_path, search_dir=temp_dir, allow_directory_fallback=False
         )
-        if not sidecars["npz"] and mkv_dir:
-            fallback = find_matching_sidecars_for_video(video_path, search_dir=mkv_dir)
-            if fallback["npz"]:
-                sidecars["npz"] = fallback["npz"]
-            if fallback["residual"] and not sidecars["residual"]:
-                sidecars["residual"] = fallback["residual"]
-        if mkv_dir:
-            fallback_meta = find_metadata_sidecars_for_video(
-                video_path, search_dir=mkv_dir, allow_directory_fallback=False
-            )
-            for plane in ("bp1", "bp2"):
-                if not metadata_sidecars.get(plane) and fallback_meta.get(plane):
-                    metadata_sidecars[plane] = fallback_meta[plane]
 
         return {
             "video": video_path,

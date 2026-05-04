@@ -678,6 +678,11 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     (stale_root / "movieB_compression_level_0_metadata_bp1.json").write_text(
         json.dumps([{"tags": {"Software": "wrong-video"}}])
     )
+    (mkv_dir / "movieA.npz").write_bytes(b"external-npz")
+    (mkv_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"external-residual")
+    (mkv_dir / "movieA_compression_level_0_metadata_bp1.json").write_text(
+        json.dumps([{"tags": {"Software": "external-metadata"}}])
+    )
 
     def _fake_extract_attachments(_self, _mkv_file, temp_dir):
         temp_dir_path = os.path.abspath(temp_dir)
@@ -722,8 +727,85 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     assert record["metadata_bp1"] is None
 
 
+def test_extract_one_mkv_ignores_external_mkv_dir_sidecars(tmp_path, monkeypatch):
+    """MKV single-file mode should not silently bind same-directory sidecars."""
+    obj = _make_unsparz_for_extract()
+    mkv_dir = tmp_path / "mkvs"
+    mkv_dir.mkdir()
+    mkv_file = mkv_dir / "movieA_compression_level_0.mkv"
+    mkv_file.write_bytes(b"")
+    (mkv_dir / "movieA.npz").write_bytes(b"external-npz")
+    (mkv_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"external-residual")
+    (mkv_dir / "movieA_compression_level_0_metadata_bp1.json").write_text(
+        json.dumps([{"tags": {"Software": "external-metadata"}}])
+    )
+
+    import types
+    obj._extract_mkv_attachments = types.MethodType(lambda _self, _m, _t: (0, 0), obj)
+
+    monkeypatch.setattr(sparz_mod.ffmpeg, "probe", lambda *_a, **_kw: {"streams": []})
+
+    class _FakeFfmpegInput:
+        def output(self, output_path, *_args, **_kwargs):
+            self.output_path = output_path
+            return self
+
+        def run(self, *_args, **_kwargs):
+            with open(self.output_path, "wb") as f:
+                f.write(b"fresh")
+
+    monkeypatch.setattr(sparz_mod.ffmpeg, "input", lambda *_a, **_kw: _FakeFfmpegInput())
+
+    record = obj._extract_one_mkv(str(mkv_file))
+    assert os.path.dirname(record["video"]) == record["temp_dir"]
+    assert record["npz"] is None
+    assert record["residual"] is None
+    assert record["metadata_bp1"] is None
+    assert record["metadata_bp2"] is None
+
+
+def test_unsparz_init_cleans_mkv_temp_dirs_on_error(tmp_path, monkeypatch):
+    """Fresh MKV extraction dirs must not survive __init__ validation failures."""
+    mkv_file = tmp_path / "movieA_compression_level_0.mkv"
+    mkv_file.write_bytes(b"")
+    temp_dir = tmp_path / "mkv_temp" / "movieA_compression_level_0_fixture"
+    temp_dir.mkdir(parents=True)
+    extracted = temp_dir / "movieA_compression_level_0.mkv"
+    extracted.write_bytes(b"fresh")
+
+    def _fake_extract_from_mkv(self, _mkv_files, _path_encoded_bp2):
+        self.path_sparse_bp1 = None
+        self.path_sparse_bp2 = None
+        self._codec_bp1 = ["x265"]
+        self._codec_bp2 = None
+        self.temp_dirs_to_cleanup.append(str(temp_dir))
+        return [str(extracted)], None
+
+    def _fail_validation(_self):
+        raise ValueError("forced MKV validation failure")
+
+    monkeypatch.setattr(UNSPARZ, "extract_from_mkv", _fake_extract_from_mkv)
+    monkeypatch.setattr(UNSPARZ, "_validate_mkv_sidecars", _fail_validation)
+
+    try:
+        UNSPARZ(
+            path_sparse_bp1=None,
+            path_encoded_bp1=str(mkv_file),
+            stem="out",
+            output_path=str(tmp_path),
+            use_roi=True,
+            streaming=True,
+        )
+    except ValueError as e:
+        assert "forced MKV validation failure" in str(e)
+    else:
+        raise AssertionError("expected MKV validation failure")
+
+    assert not temp_dir.exists()
+
+
 def test_find_metadata_sidecars_exact_only_ignores_unmatched_singleton(tmp_path):
-    """Shared MKV temp dirs must not assign another video's lone JSON sidecar."""
+    """Exact metadata matching must not assign another video's lone JSON sidecar."""
     video = tmp_path / "movieB_compression_level_0.mkv"
     video.write_bytes(b"")
     decoy = tmp_path / "movieA_compression_level_0_metadata_bp1.json"
