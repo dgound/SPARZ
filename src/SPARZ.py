@@ -778,15 +778,16 @@ def find_matching_sidecars_for_video(video_path, search_dir=None):
     }
 
 
-def find_metadata_sidecars_for_video(video_path, search_dir=None):
+def find_metadata_sidecars_for_video(video_path, search_dir=None, allow_directory_fallback=True):
     """Return metadata JSON sidecars matching ``video_path`` by original stem.
 
     FFV1 single-file archives may have no ROI NPZ to carry embedded metadata,
     so SPARZIP attaches a per-video JSON sidecar named
     ``<video_stem>_metadata_bp{1,2}.json``. Prefer that exact stem match, then
-    accept the older ``<input_stem>_metadata_bp{1,2}.json`` form, and finally
-    fall back to a single metadata JSON in the directory for compatibility
-    with dataset-level ``<stem>_metadata_bp{1,2}.json`` files.
+    accept the older ``<input_stem>_metadata_bp{1,2}.json`` form. When
+    ``allow_directory_fallback`` is true, also fall back to a single metadata
+    JSON in the directory for compatibility with dataset-level
+    ``<stem>_metadata_bp{1,2}.json`` files.
     """
     video_dir = search_dir if search_dir is not None else os.path.dirname(video_path) or "."
     video_base = os.path.splitext(os.path.basename(video_path))[0]
@@ -803,8 +804,11 @@ def find_metadata_sidecars_for_video(video_path, search_dir=None):
                 break
         if plane in out:
             continue
-        matches = sorted(glob.glob(os.path.join(video_dir, f"*_metadata_{plane}.json")))
-        out[plane] = matches[0] if len(matches) == 1 else None
+        if allow_directory_fallback:
+            matches = sorted(glob.glob(os.path.join(video_dir, f"*_metadata_{plane}.json")))
+            out[plane] = matches[0] if len(matches) == 1 else None
+        else:
+            out[plane] = None
     return out
 
 
@@ -3359,7 +3363,9 @@ class UNSPARZ:
 
         # Match sidecars by stem in the temp dir first, then the MKV dir.
         sidecars = find_matching_sidecars_for_video(video_path, search_dir=temp_dir)
-        metadata_sidecars = find_metadata_sidecars_for_video(video_path, search_dir=temp_dir)
+        metadata_sidecars = find_metadata_sidecars_for_video(
+            video_path, search_dir=temp_dir, allow_directory_fallback=False
+        )
         if not sidecars["npz"] and mkv_dir:
             fallback = find_matching_sidecars_for_video(video_path, search_dir=mkv_dir)
             if fallback["npz"]:
@@ -3367,7 +3373,9 @@ class UNSPARZ:
             if fallback["residual"] and not sidecars["residual"]:
                 sidecars["residual"] = fallback["residual"]
         if mkv_dir:
-            fallback_meta = find_metadata_sidecars_for_video(video_path, search_dir=mkv_dir)
+            fallback_meta = find_metadata_sidecars_for_video(
+                video_path, search_dir=mkv_dir, allow_directory_fallback=False
+            )
             for plane in ("bp1", "bp2"):
                 if not metadata_sidecars.get(plane) and fallback_meta.get(plane):
                     metadata_sidecars[plane] = fallback_meta[plane]
@@ -3760,6 +3768,15 @@ class UNSPARZ:
         metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
         metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
 
+        attached_metadata_bp1 = self._load_metadata_json_collection(
+            getattr(self, 'path_metadata_bp1', None), 'BP1'
+        )
+        if attached_metadata_bp1:
+            attached_metadata_bp2 = self._load_metadata_json_collection(
+                getattr(self, 'path_metadata_bp2', None), 'BP2'
+            )
+            return attached_metadata_bp1, attached_metadata_bp2
+
         # If exact stem match not found, try auto-detection
         if not os.path.exists(metadata_file_bp1):
             print(f'Exact metadata file not found: {metadata_file_bp1}')
@@ -3792,15 +3809,6 @@ class UNSPARZ:
 
         metadata_bp1 = None
         metadata_bp2 = None
-
-        attached_metadata_bp1 = self._load_metadata_json_collection(
-            getattr(self, 'path_metadata_bp1', None), 'BP1'
-        )
-        if attached_metadata_bp1:
-            attached_metadata_bp2 = self._load_metadata_json_collection(
-                getattr(self, 'path_metadata_bp2', None), 'BP2'
-            )
-            return attached_metadata_bp1, attached_metadata_bp2
 
         if os.path.exists(metadata_file_bp1):
             try:

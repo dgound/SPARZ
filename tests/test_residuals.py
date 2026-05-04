@@ -679,6 +679,9 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     # Decoy sidecars with a different stem must NOT be picked up.
     (temp_dir / "movieB.npz").write_bytes(b"")
     (temp_dir / ("movieB_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+    (temp_dir / "movieB_compression_level_0_metadata_bp1.json").write_text(
+        json.dumps([{"tags": {"Software": "wrong-video"}}])
+    )
 
     # Stub out the ffmpeg pieces so no subprocess is launched.
     import types
@@ -695,6 +698,26 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     assert record["video"] == str(video_path)
     assert record["npz"].endswith("movieA.npz")
     assert os.path.basename(record["residual"]).startswith("movieA")
+    assert record["metadata_bp1"] is None
+
+
+def test_find_metadata_sidecars_exact_only_ignores_unmatched_singleton(tmp_path):
+    """Shared MKV temp dirs must not assign another video's lone JSON sidecar."""
+    video = tmp_path / "movieB_compression_level_0.mkv"
+    video.write_bytes(b"")
+    decoy = tmp_path / "movieA_compression_level_0_metadata_bp1.json"
+    decoy.write_text(json.dumps([{"tags": {"Software": "movieA"}}]))
+
+    exact_only = sparz_mod.find_metadata_sidecars_for_video(
+        str(video), search_dir=str(tmp_path), allow_directory_fallback=False
+    )
+    assert exact_only["bp1"] is None
+    assert exact_only["bp2"] is None
+
+    fallback = sparz_mod.find_metadata_sidecars_for_video(
+        str(video), search_dir=str(tmp_path)
+    )
+    assert fallback["bp1"] == str(decoy)
 
 
 def test_load_sparse_accepts_list(tmp_path):
@@ -1419,6 +1442,11 @@ def test_load_original_metadata_accepts_list_with_none(tmp_path):
 
 def test_load_original_metadata_prefers_attached_json_sidecar(tmp_path):
     """FFV1 MKVs can carry metadata JSON even when there is no ROI NPZ."""
+    stale_path = tmp_path / "test_metadata_bp1.json"
+    stale_path.write_text(json.dumps([{
+        "tags": {"Software": "stale-output-json"},
+        "is_encoded": False,
+    }]))
     metadata_path = tmp_path / "movieA_compression_level_0_metadata_bp1.json"
     metadata_path.write_text(json.dumps([{
         "tags": {"Software": "ffv1-sidecar"},
