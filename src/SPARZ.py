@@ -738,6 +738,29 @@ def get_residual_path_for_video(video_path):
     return base + RESIDUAL_SUFFIX
 
 
+def _container_for_mkv_video_codec(codec_name):
+    """Pick ``(file_ext, ffmpeg_format_name)`` for re-muxing an MKV's video stream.
+
+    The MKV container itself accepts almost everything, but a stream-copy
+    extraction has to land in a container that can hold the codec. ``.mp4`` is
+    safe for h264/hevc/av1; ffv1 needs MKV (or AVI); ProRes needs MOV. Anything
+    unknown stays in MKV, which is the most permissive option.
+    """
+    name = (codec_name or "").lower()
+    if name in ("h264", "avc", "avc1", "libx264"):
+        return "mp4", "mp4"
+    if name in ("hevc", "h265", "libx265"):
+        return "mp4", "mp4"
+    if name in ("av1", "libaom-av1", "libsvtav1"):
+        return "mp4", "mp4"
+    if name == "ffv1":
+        return "mkv", "matroska"
+    if name in ("prores", "prores_ks"):
+        return "mov", "mov"
+    # Safe default — MKV holds anything ffmpeg can stream-copy.
+    return "mkv", "matroska"
+
+
 def find_matching_sidecars_for_video(video_path, search_dir=None):
     """Return {'npz': path|None, 'residual': path|None} for sidecars matching this video.
 
@@ -753,6 +776,64 @@ def find_matching_sidecars_for_video(video_path, search_dir=None):
         "npz": npz_path if os.path.exists(npz_path) else None,
         "residual": res_path if os.path.exists(res_path) else None,
     }
+
+
+class _LazyVideoProbe:
+    """Shape/dtype probe for an encoded video without decoding any frames.
+
+    Stand-in for a Dask array in the streaming UNSPARZ path: it exposes
+    ``shape``, ``dtype``, and ``ndim`` so existing code that just queries
+    metadata keeps working, but it never materialises frames. The streaming
+    pipeline opens its own PyAV iterator on the underlying file when it
+    actually needs to decode.
+
+    For containers where ``stream.frames`` is not populated we fall back to
+    iterating the decode pass once just to count — that is one full CPU pass
+    over the file but does not allocate per-frame buffers.
+    """
+
+    __slots__ = ("path", "_shape", "_dtype")
+
+    def __init__(self, path):
+        self.path = path
+        self._shape, self._dtype = self._probe(path)
+
+    @staticmethod
+    def _probe(path):
+        container = av.open(path)
+        try:
+            stream = container.streams.video[0]
+            T = stream.frames or 0
+            ctx = stream.codec_context
+            H = ctx.height or 0
+            W = ctx.width or 0
+            if H == 0 or W == 0 or T == 0:
+                first = next(container.decode(stream), None)
+                if first is None:
+                    raise RuntimeError(f"empty video: {path}")
+                arr = first.to_ndarray(format="gray16le")
+                if H == 0 or W == 0:
+                    H, W = int(arr.shape[0]), int(arr.shape[1])
+                if T == 0:
+                    count = 1  # already consumed first
+                    for _ in container.decode(stream):
+                        count += 1
+                    T = count
+        finally:
+            container.close()
+        return (int(T), int(H), int(W)), np.dtype(np.uint16)
+
+    @property
+    def shape(self):
+        return self._shape
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def ndim(self):
+        return 3
 
 
 class SPARZIP:
@@ -2952,7 +3033,8 @@ class UNSPARZ:
                  output_format: str = 'tiff',
                  use_residuals:bool=True,
                  path_residual_bp1:str=None,
-                 path_residual_bp2:str=None):
+                 path_residual_bp2:str=None,
+                 streaming:bool=True):
 
         # Store original parameters
         original_path_sparse_bp1 = path_sparse_bp1
@@ -2965,8 +3047,11 @@ class UNSPARZ:
         self.use_residuals = use_residuals
         self.path_residual_bp1 = path_residual_bp1
         self.path_residual_bp2 = path_residual_bp2
+        # Set use_roi early so _validate_mkv_sidecars sees the right value.
+        self.use_roi = use_roi
 
         # Check if we have MKV files (single-file format)
+        self._mkv_extracted = False
         if self._looks_like_mkv_input(path_encoded_bp1):
             mkv_files = self._resolve_mkv_files(path_encoded_bp1)
             if not mkv_files:
@@ -2976,12 +3061,13 @@ class UNSPARZ:
             # extract_from_mkv populated path_sparse_<plane> / path_residual_<plane>
             path_sparse_bp1 = self.path_sparse_bp1
             path_sparse_bp2 = self.path_sparse_bp2
+            self._mkv_extracted = True
+            # Fail fast on missing required sidecars rather than passing None downstream.
+            self._validate_mkv_sidecars()
         else:
             # Traditional separate files
             self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
             self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
-
-        self.use_roi = use_roi
 
         self.output_format = output_format.lower()
         if self.output_format not in ['tiff', 'dat']:
@@ -2991,23 +3077,44 @@ class UNSPARZ:
             raise ValueError("No encoded video files were resolved from path_encoded_bp1")
 
         first_ext = os.path.splitext(self.path_encoded_bp1[0])[1]
+        # zstd-encoded image stacks have no streaming-decode path; they always
+        # use the legacy eager Dask flow.
+        self.streaming = bool(streaming) and first_ext != '.zst'
+
         if first_ext == '.zst':
             if self.use_roi:
                 print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
                 self.use_roi = False
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(self.path_encoded_bp1, self.path_encoded_bp2)
+        elif self.streaming:
+            # Streaming path: only probe shape/dtype; never decode frames in __init__.
+            self.encoded_bp1 = [_LazyVideoProbe(p) for p in self.path_encoded_bp1]
+            self.encoded_bp2 = ([_LazyVideoProbe(p) for p in self.path_encoded_bp2]
+                                if self.path_encoded_bp2 else None)
         else:
             self.encoded_bp1, self.encoded_bp2 = self.decode(self.path_encoded_bp1, self.path_encoded_bp2)
 
-        # Apply optional residual sidecars before any ROI patching
+        # Track ROI sparse paths for later use (streaming uses them per chunk).
+        self._path_sparse_bp1_resolved = path_sparse_bp1
+        self._path_sparse_bp2_resolved = path_sparse_bp2
+
+        # Optional exact-reconstruction residual sidecars.
         if self.use_residuals and first_ext != '.zst':
             self._autodetect_residual_paths()
-            self._apply_residuals_to_encoded()
+            if not self.streaming:
+                # Eager Dask apply only; streaming applies per chunk in run().
+                self._apply_residuals_to_encoded()
 
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
-        if self.use_roi:
-            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2,self.shapes)
+        if self.use_roi and not self.streaming:
+            self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
             self.processed_bp1, self.processed_bp2 = self.process_frames()
+        else:
+            # Streaming: ROI is loaded coords-only per video at run() time.
+            self.sparse_bp1 = None
+            self.sparse_bp2 = None
+            self.processed_bp1 = None
+            self.processed_bp2 = None
         self.stem = stem
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
@@ -3104,6 +3211,10 @@ class UNSPARZ:
 
         Returns ``{'video', 'npz', 'residual', 'temp_dir', 'mkv_dir'}``. Sidecar
         entries may be ``None`` when no matching file is present.
+
+        The output container is chosen from the MKV's video codec
+        (h264/hevc/av1 → .mp4, ffv1 → .mkv, prores → .mov, anything else → .mkv)
+        because plain ``.mp4`` cannot hold ffv1/prores in a stream-copy mux.
         """
         print(f'Extracting from MKV: {mkv_file}')
         mkv_dir = os.path.dirname(mkv_file)
@@ -3112,16 +3223,29 @@ class UNSPARZ:
         if temp_dir not in self.temp_dirs_to_cleanup:
             self.temp_dirs_to_cleanup.append(temp_dir)
 
-        video_name = os.path.splitext(os.path.basename(mkv_file))[0] + '.mp4'
+        # Probe codec to pick a compatible container/extension.
+        codec_name = None
+        try:
+            probe = ffmpeg.probe(mkv_file)
+            video_streams = [s for s in probe.get('streams', []) if s.get('codec_type') == 'video']
+            if video_streams:
+                codec_name = video_streams[0].get('codec_name')
+        except Exception:
+            codec_name = None
+        ext, container_format = _container_for_mkv_video_codec(codec_name)
+        if codec_name:
+            print(f'  Source codec: {codec_name} → extracting to .{ext}')
+
+        video_name = os.path.splitext(os.path.basename(mkv_file))[0] + '.' + ext
         video_path = os.path.join(temp_dir, video_name)
 
         try:
             if os.path.exists(video_path):
                 print(f'Video already extracted: {video_name}')
             else:
-                ffmpeg.input(mkv_file).output(video_path, vcodec='copy').run(
-                    overwrite_output=True, capture_stdout=True, capture_stderr=True
-                )
+                ffmpeg.input(mkv_file).output(
+                    video_path, vcodec='copy', format=container_format
+                ).run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
                 print(f'Extracted video: {video_name}')
             n_npz, n_res = self._extract_mkv_attachments(mkv_file, temp_dir)
             print(f'Extracted {n_npz} NPZ + {n_res} residual sidecar(s) from '
@@ -3227,6 +3351,71 @@ class UNSPARZ:
                 bp2_videos = [r["video"] for r in bp2_records]
 
         return bp1_videos, bp2_videos
+
+    def _validate_mkv_sidecars(self):
+        """Verify that MKV-extracted sidecars cover what reconstruction will need.
+
+        Raises ``ValueError`` with a clear plane/path message rather than
+        passing ``None`` or partial lists down to ``load_sparse`` /
+        ``_apply_residuals_to_encoded`` / streaming reconstruction.
+        """
+        n1 = len(self.path_encoded_bp1)
+        n2 = len(self.path_encoded_bp2) if self.path_encoded_bp2 else 0
+
+        def _check_roi(plane, n_videos, sparse_paths, video_paths):
+            if not sparse_paths:
+                raise ValueError(
+                    f"MKV reconstruction with use_roi=True needs the {plane} sparse "
+                    f"ROI sidecar(s) (.npz), but none were extracted. Set use_roi=False "
+                    f"to reconstruct background-only, or re-package the MKV with the "
+                    f"sidecar attached."
+                )
+            resolved = self._resolve_paths(sparse_paths)
+            if len(resolved) < n_videos:
+                missing_for = video_paths[len(resolved):]
+                raise ValueError(
+                    f"{plane} has {n_videos} video(s) but only {len(resolved)} ROI "
+                    f"sidecar(s) were extracted; missing for: {missing_for}"
+                )
+            missing = [p for p in resolved if not os.path.exists(p)]
+            if missing:
+                raise ValueError(f"Missing {plane} ROI sidecar(s): {missing}")
+
+        if self.use_roi:
+            _check_roi("bp1", n1, self.path_sparse_bp1, self.path_encoded_bp1)
+            if self.path_encoded_bp2:
+                _check_roi("bp2", n2, self.path_sparse_bp2, self.path_encoded_bp2)
+
+        def _check_residuals(plane, n_videos, residual_list, video_paths):
+            if residual_list is None:
+                return  # nothing advertised, nothing to validate
+            if isinstance(residual_list, str):
+                # Glob-shaped explicit override; presence checked when applied.
+                return
+            if not isinstance(residual_list, (list, tuple)):
+                return
+            if not any(residual_list):
+                return  # no residuals advertised
+            if len(residual_list) < n_videos:
+                raise ValueError(
+                    f"{plane} advertises residuals but only {len(residual_list)} "
+                    f"residual sidecar(s) extracted for {n_videos} video(s)"
+                )
+            missing = [
+                video_paths[i] for i, r in enumerate(residual_list) if not r
+            ]
+            if missing:
+                raise ValueError(
+                    f"{plane} MKV archive(s) advertise residuals but the matching "
+                    f"sidecar is missing for video(s): {missing}"
+                )
+            absent_on_disk = [r for r in residual_list if r and not os.path.exists(r)]
+            if absent_on_disk:
+                raise ValueError(f"Missing {plane} residual sidecar(s): {absent_on_disk}")
+
+        _check_residuals("bp1", n1, self.path_residual_bp1, self.path_encoded_bp1)
+        if self.path_encoded_bp2:
+            _check_residuals("bp2", n2, self.path_residual_bp2, self.path_encoded_bp2)
 
     def cleanup_temp_directories(self):
         """
@@ -4199,7 +4388,267 @@ class UNSPARZ:
                 f.write(chunk.tobytes())
 
 
+    # ------------------------------------------------------------------
+    # Streaming reconstruction helpers
+    # ------------------------------------------------------------------
+
+    def _iter_video_chunks_streaming(self, video_path, chunk_size):
+        """Single-pass PyAV decode → bounded-memory uint16 chunks."""
+        container = av.open(video_path)
+        try:
+            stream = container.streams.video[0]
+            buf = []
+            start = 0
+            for frame in container.decode(stream):
+                np_frame = frame.to_ndarray(format="gray16le").astype(np.uint16, copy=False)
+                buf.append(np_frame)
+                if len(buf) == chunk_size:
+                    end = start + len(buf)
+                    yield start, end, np.stack(buf, axis=0)
+                    start = end
+                    buf = []
+            if buf:
+                end = start + len(buf)
+                yield start, end, np.stack(buf, axis=0)
+        finally:
+            container.close()
+
+    def _load_roi_for_streaming(self, npz_path):
+        """Load ROI as ``{coords, data, shape}`` without densifying anything."""
+        if not npz_path or not os.path.exists(npz_path):
+            return None
+        coo = self.load_sparse_matrix_from_npz(npz_path)
+        if coo is None:
+            return None
+        return {
+            "coords": np.asarray(coo.coords),
+            "data": np.asarray(coo.data),
+            "shape": tuple(coo.shape),
+        }
+
+    def _apply_residual_and_roi_to_chunk(self, decoded_chunk, start, end,
+                                         residual_chunk_iter, roi_info,
+                                         target_dtype, H, W, context=None):
+        """Apply matching residual + ROI slab to one decoded chunk.
+
+        Memory: a single int64 buffer of ``decoded_chunk.size``, never the
+        whole video. Raises on misalignment so silent corruption can't slip
+        through.
+        """
+        n_frames = end - start
+        if decoded_chunk.shape != (n_frames, H, W):
+            raise ValueError(
+                f"decoded chunk shape {decoded_chunk.shape} != ({n_frames},{H},{W})"
+                + (f" (context: {context})" if context else "")
+            )
+        target_dtype = np.dtype(target_dtype)
+        out = decoded_chunk
+
+        if residual_chunk_iter is not None:
+            try:
+                res_start, res_end, res_chunk, _h = next(residual_chunk_iter)
+            except StopIteration:
+                raise ValueError(
+                    f"residual stream exhausted before video chunk [{start},{end})"
+                    + (f" (context: {context})" if context else "")
+                )
+            if (res_start, res_end) != (start, end):
+                raise ValueError(
+                    f"residual chunk [{res_start},{res_end}) misaligned with "
+                    f"decoded chunk [{start},{end})"
+                    + (f" (context: {context})" if context else "")
+                )
+            if res_chunk.shape != decoded_chunk.shape:
+                raise ValueError(
+                    f"residual chunk shape {res_chunk.shape} != decoded {decoded_chunk.shape}"
+                    + (f" (context: {context})" if context else "")
+                )
+            summed = decoded_chunk.astype(np.int64) + res_chunk.astype(np.int64)
+            if np.issubdtype(target_dtype, np.integer):
+                info = np.iinfo(target_dtype)
+                np.clip(summed, info.min, info.max, out=summed)
+            out = summed.astype(target_dtype)
+        elif decoded_chunk.dtype != target_dtype:
+            out = decoded_chunk.astype(target_dtype)
+
+        if roi_info is not None:
+            coords = roi_info["coords"]
+            if coords.size:
+                sel = (coords[0] >= start) & (coords[0] < end)
+                if sel.any():
+                    cc = coords[:, sel]
+                    vv = roi_info["data"][sel]
+                    if not out.flags.writeable or out is decoded_chunk:
+                        out = out.copy()
+                    out[cc[0] - start, cc[1], cc[2]] = vv.astype(target_dtype)
+        return out
+
+    def _streaming_reconstruct_one(self, video_path, residual_path, roi_npz_path,
+                                   T, H, W, original_dtype):
+        """Generator yielding ``(start, end, chunk_uint_target)`` for one video.
+
+        Aligns the chunk size to the residual sidecar's ``chunk_size`` when one
+        is present so the chunk-by-chunk apply is exact and zero-misaligned.
+        """
+        residual_chunk_iter = None
+        chunk_size_resid = None
+        if residual_path and os.path.exists(residual_path):
+            header = read_residual_header(residual_path)
+            if header["shape"] != (T, H, W):
+                raise ValueError(
+                    f"residual {residual_path} shape {header['shape']} != "
+                    f"video {(T, H, W)} for {video_path}"
+                )
+            chunk_size_resid = header.get("chunk_size") or T
+            residual_chunk_iter = iter_residual_chunks_from_path(residual_path)
+
+        chunk_size = max(1, int(chunk_size_resid or self.chunk_size or 50))
+
+        roi_info = None
+        if roi_npz_path:
+            roi_info = self._load_roi_for_streaming(roi_npz_path)
+            if roi_info is not None and roi_info["shape"] != (T, H, W):
+                raise ValueError(
+                    f"ROI {roi_npz_path} shape {roi_info['shape']} != video {(T, H, W)} "
+                    f"for {video_path}"
+                )
+
+        last_end = 0
+        for start, end, decoded_chunk in self._iter_video_chunks_streaming(video_path, chunk_size):
+            if end > T:
+                raise ValueError(
+                    f"video {video_path} produced more than {T} frames (reached {end})"
+                )
+            if decoded_chunk.shape[1:] != (H, W):
+                raise ValueError(
+                    f"decoded frame size {decoded_chunk.shape[1:]} != ({H},{W}) "
+                    f"for {video_path}"
+                )
+            yield start, end, self._apply_residual_and_roi_to_chunk(
+                decoded_chunk, start, end, residual_chunk_iter, roi_info,
+                np.dtype(original_dtype), H, W, context=video_path,
+            )
+            last_end = end
+
+        if last_end != T:
+            raise ValueError(
+                f"video {video_path} ended at frame {last_end} but expected {T}"
+            )
+        if residual_chunk_iter is not None:
+            leftover = next(residual_chunk_iter, None)
+            if leftover is not None:
+                raise ValueError(
+                    f"residual {residual_path} has chunk(s) past the end of video {video_path}"
+                )
+
+    def _residual_path_for_index(self, residual_paths, k):
+        if residual_paths is None:
+            return None
+        if isinstance(residual_paths, (list, tuple)):
+            return residual_paths[k] if k < len(residual_paths) else None
+        if isinstance(residual_paths, str):
+            matched = sorted(glob.glob(residual_paths))
+            return matched[k] if k < len(matched) else None
+        return None
+
+    def _roi_npz_path_for_index(self, sparse_paths, k):
+        if sparse_paths is None:
+            return None
+        resolved = self._resolve_paths(sparse_paths)
+        return resolved[k] if k < len(resolved) else None
+
+    def _original_dtype_for(self, residual_path):
+        if residual_path and os.path.exists(residual_path):
+            try:
+                return np.dtype(read_residual_header(residual_path)["original_dtype"])
+            except Exception:
+                pass
+        return np.dtype(np.uint16)
+
+    def _write_streaming_output(self, filename, chunks_gen, T, H, W, original_dtype,
+                                file_metadata, debug_prefix=""):
+        """Drive the chunk generator and write to ``self.output_format``.
+
+        TIFF: allocate the final output buffer, fill via streaming chunks, then
+        hand off to ``write_tiff_file`` which knows how to embed metadata.
+        DAT: stream raw bytes incrementally — never holds more than one chunk.
+        """
+        if self.output_format == "tiff":
+            target_dtype = np.dtype(original_dtype)
+            out = np.empty((T, H, W), dtype=target_dtype)
+            for start, end, chunk in chunks_gen:
+                out[start:end] = chunk
+            self.write_tiff_file(filename, out, file_metadata, debug_prefix=debug_prefix)
+        elif self.output_format == "dat":
+            target_dtype = np.dtype(original_dtype)
+            with open(filename, "wb") as f:
+                for _start, _end, chunk in chunks_gen:
+                    f.write(np.ascontiguousarray(chunk, dtype=target_dtype).tobytes())
+        else:
+            raise ValueError(f"Unsupported output_format: {self.output_format}")
+
+    def _run_streaming(self):
+        """Streaming-reconstruction driver. Memory bound: one chunk + final output."""
+        print("Inflating images (streaming)...")
+        if self.use_roi:
+            print("Patching in ROI per chunk...")
+        else:
+            print("Reconstructing background only (no ROI patch)...")
+
+        n_videos = len(self.path_encoded_bp1)
+        for k in range(n_videos):
+            video_path = self.path_encoded_bp1[k]
+            residual_path = self._residual_path_for_index(self.path_residual_bp1, k) if self.use_residuals else None
+            roi_npz_path = self._roi_npz_path_for_index(self._path_sparse_bp1_resolved, k) if self.use_roi else None
+            original_dtype = self._original_dtype_for(residual_path)
+            T, H, W = self.encoded_bp1[k].shape
+
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(video_path))[1])[0]
+            output_filename1 = f"{self.output_path}{self.stem}_{input_file_name1}"
+            ext = "tiff" if self.output_format == "tiff" else "dat"
+            out_path1 = f"{output_filename1}.{ext}"
+            file_metadata = self.metadata_bp1[k] if k < len(self.metadata_bp1) else {}
+
+            chunks_gen = self._streaming_reconstruct_one(
+                video_path, residual_path, roi_npz_path, T, H, W, original_dtype
+            )
+            self._write_streaming_output(
+                out_path1, chunks_gen, T, H, W, original_dtype, file_metadata,
+                debug_prefix="BP1 ",
+            )
+
+            if self.encoded_bp2 is not None:
+                video_path2 = self.path_encoded_bp2[k]
+                residual_path2 = self._residual_path_for_index(self.path_residual_bp2, k) if self.use_residuals else None
+                roi_npz_path2 = self._roi_npz_path_for_index(self._path_sparse_bp2_resolved, k) if self.use_roi else None
+                original_dtype2 = self._original_dtype_for(residual_path2)
+                T2, H2, W2 = self.encoded_bp2[k].shape
+
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(video_path2))[1])[0]
+                output_filename2 = f"{self.output_path}{self.stem}_{input_file_name2}"
+                out_path2 = f"{output_filename2}.{ext}"
+                file_metadata2 = self.metadata_bp2[k] if self.metadata_bp2 and k < len(self.metadata_bp2) else {}
+
+                chunks_gen2 = self._streaming_reconstruct_one(
+                    video_path2, residual_path2, roi_npz_path2, T2, H2, W2, original_dtype2
+                )
+                self._write_streaming_output(
+                    out_path2, chunks_gen2, T2, H2, W2, original_dtype2, file_metadata2,
+                    debug_prefix="BP2 ",
+                )
+
+            gc.collect()
+
+        print("Done.")
+        self.cleanup_temp_directories()
+
+    # ------------------------------------------------------------------
+    # Legacy eager run (kept for streaming=False / zstd image stacks)
+    # ------------------------------------------------------------------
+
     def run(self):
+        if getattr(self, "streaming", False):
+            return self._run_streaming()
         print('Inflating images...')
         show_progress_bar = False
         try:

@@ -26,6 +26,7 @@ from SPARZ import (
     apply_residuals,
     get_residual_path_for_video,
     find_matching_sidecars_for_video,
+    _container_for_mkv_video_codec,
     RESIDUAL_SUFFIX,
     RESIDUAL_VERSION,
     RESIDUAL_VERSION_V2,
@@ -649,9 +650,10 @@ def test_wire_sidecars_warns_on_missing_npz(tmp_path, capsys):
 def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     """_extract_one_mkv picks sidecars whose stems match the extracted video.
 
-    We cannot run ffmpeg in unit tests, so we pre-create the temp dir the same
-    way _extract_one_mkv would and short-circuit the ffmpeg calls by faking the
-    'video already extracted' branch.
+    We cannot run ffmpeg/ffprobe in unit tests, so we stub them out: the codec
+    probe returns ``None`` (which maps to ``.mkv``), the attachment extractor
+    is a no-op, and we pre-create the extracted ``.mkv`` so the "already
+    extracted" branch fires instead of invoking real ffmpeg.
     """
     obj = _make_unsparz_for_extract()
     mkv_dir = tmp_path / "mkvs"
@@ -661,7 +663,9 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
 
     temp_dir = mkv_dir / "mkv_temp"
     temp_dir.mkdir()
-    video_path = temp_dir / "movieA_compression_level_0.mp4"
+    # Codec probe falls back to ``("mkv", "matroska")`` for unknown codecs,
+    # so the extracted video lands here as ``.mkv`` (not ``.mp4``).
+    video_path = temp_dir / "movieA_compression_level_0.mkv"
     video_path.write_bytes(b"")
     (temp_dir / "movieA.npz").write_bytes(b"")
     (temp_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
@@ -669,11 +673,18 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     (temp_dir / "movieB.npz").write_bytes(b"")
     (temp_dir / ("movieB_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
 
-    # Stub out _extract_mkv_attachments — it needs ffmpeg/ffprobe.
+    # Stub out the ffmpeg pieces so no subprocess is launched.
     import types
     obj._extract_mkv_attachments = types.MethodType(lambda self, m, t: (0, 0), obj)
 
-    record = obj._extract_one_mkv(str(mkv_file))
+    import SPARZ as _sparz
+    real_probe = _sparz.ffmpeg.probe
+    _sparz.ffmpeg.probe = lambda *_a, **_kw: {"streams": []}
+    try:
+        record = obj._extract_one_mkv(str(mkv_file))
+    finally:
+        _sparz.ffmpeg.probe = real_probe
+
     assert record["video"] == str(video_path)
     assert record["npz"].endswith("movieA.npz")
     assert os.path.basename(record["residual"]).startswith("movieA")
@@ -708,6 +719,274 @@ def test_full_mode_residual_does_not_zero_at_roi():
     assert header["mode"] == "full"
     # At least some pixels carry a non-zero residual (this would be zero in background mode).
     assert np.any(loaded != 0)
+
+
+# ---------------------------------------------------------------------------
+# Codec/container helper for MKV extraction
+# ---------------------------------------------------------------------------
+
+def test_container_for_mkv_video_codec_picks_correct_extension():
+    assert _container_for_mkv_video_codec("h264") == ("mp4", "mp4")
+    assert _container_for_mkv_video_codec("hevc") == ("mp4", "mp4")
+    assert _container_for_mkv_video_codec("av1") == ("mp4", "mp4")
+    # ffv1 must not be muxed into mp4
+    assert _container_for_mkv_video_codec("ffv1") == ("mkv", "matroska")
+    # ProRes wants .mov
+    assert _container_for_mkv_video_codec("prores") == ("mov", "mov")
+    assert _container_for_mkv_video_codec("prores_ks") == ("mov", "mov")
+    # Unknown / missing codec falls back to a permissive container
+    assert _container_for_mkv_video_codec(None) == ("mkv", "matroska")
+    assert _container_for_mkv_video_codec("something_weird") == ("mkv", "matroska")
+    # Case-insensitive
+    assert _container_for_mkv_video_codec("HEVC") == ("mp4", "mp4")
+
+
+# ---------------------------------------------------------------------------
+# MKV sidecar validation
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_validation(use_roi, path_encoded_bp1, path_encoded_bp2=None,
+                                 path_sparse_bp1=None, path_sparse_bp2=None,
+                                 path_residual_bp1=None, path_residual_bp2=None):
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.use_roi = use_roi
+    obj.path_encoded_bp1 = list(path_encoded_bp1)
+    obj.path_encoded_bp2 = list(path_encoded_bp2) if path_encoded_bp2 else None
+    obj.path_sparse_bp1 = path_sparse_bp1
+    obj.path_sparse_bp2 = path_sparse_bp2
+    obj.path_residual_bp1 = path_residual_bp1
+    obj.path_residual_bp2 = path_residual_bp2
+    return obj
+
+
+def test_validate_mkv_sidecars_missing_bp1_roi_raises():
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=["/tmp/movieA_compression_level_0.mp4"],
+        path_sparse_bp1=None,  # advertised use_roi but no NPZ
+    )
+    try:
+        obj._validate_mkv_sidecars()
+    except ValueError as e:
+        msg = str(e)
+        assert "use_roi" in msg or "ROI" in msg
+        assert "bp1" in msg
+    else:
+        raise AssertionError("expected ValueError when bp1 ROI sidecar missing")
+
+
+def test_validate_mkv_sidecars_biplane_missing_bp2_roi_raises(tmp_path):
+    npz1 = tmp_path / "movieA.npz"
+    npz1.write_bytes(b"")
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[str(tmp_path / "movieA_compression_level_0.mp4")],
+        path_encoded_bp2=[str(tmp_path / "movieB_compression_level_0.mp4")],
+        path_sparse_bp1=[str(npz1)],
+        path_sparse_bp2=None,  # bp2 missing entirely
+    )
+    try:
+        obj._validate_mkv_sidecars()
+    except ValueError as e:
+        msg = str(e)
+        assert "bp2" in msg
+        assert "ROI" in msg or "use_roi" in msg
+    else:
+        raise AssertionError("expected ValueError when bp2 ROI sidecar missing")
+
+
+def test_validate_mkv_sidecars_partial_residual_raises(tmp_path):
+    npz1 = tmp_path / "movieA.npz"; npz1.write_bytes(b"")
+    npz2 = tmp_path / "movieB.npz"; npz2.write_bytes(b"")
+    res1 = tmp_path / ("movieA_compression_level_0" + RESIDUAL_SUFFIX); res1.write_bytes(b"")
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[
+            str(tmp_path / "movieA_compression_level_0.mp4"),
+            str(tmp_path / "movieB_compression_level_0.mp4"),
+        ],
+        path_sparse_bp1=[str(npz1), str(npz2)],
+        # Advertised: residual exists for movieA but not for movieB (gap in list).
+        path_residual_bp1=[str(res1), None],
+    )
+    try:
+        obj._validate_mkv_sidecars()
+    except ValueError as e:
+        msg = str(e)
+        assert "residual" in msg.lower()
+        assert "bp1" in msg
+    else:
+        raise AssertionError("expected ValueError when residual sidecar partial")
+
+
+def test_validate_mkv_sidecars_no_residuals_advertised_passes(tmp_path):
+    """If no residuals were attached at all, validation should not complain."""
+    npz1 = tmp_path / "movieA.npz"; npz1.write_bytes(b"")
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[str(tmp_path / "movieA_compression_level_0.mp4")],
+        path_sparse_bp1=[str(npz1)],
+        path_residual_bp1=None,  # nothing advertised
+    )
+    obj._validate_mkv_sidecars()  # should not raise
+
+
+def test_validate_mkv_sidecars_use_roi_false_skips_roi_check():
+    obj = _make_unsparz_for_validation(
+        use_roi=False,
+        path_encoded_bp1=["/tmp/movieA_compression_level_0.mp4"],
+        path_sparse_bp1=None,  # no NPZ but use_roi=False so OK
+    )
+    obj._validate_mkv_sidecars()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# Streaming reconstruction equivalence
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_streaming():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.use_roi = True
+    obj.use_residuals = True
+    obj.streaming = True
+    obj.chunk_size = 4
+    obj.output_format = "tiff"
+    return obj
+
+
+def test_apply_residual_and_roi_to_chunk_matches_full_reference():
+    """One-chunk apply must equal manual reference (residual + ROI patch)."""
+    rng = np.random.default_rng(11)
+    H, W = 4, 4
+    n_frames = 3
+    original = rng.integers(0, 4096, size=(n_frames, H, W), dtype=np.uint16)
+    decoded = _make_decoded_with_loss(original, scale=2)
+
+    # ROI: a few pixels per frame
+    roi_mask = np.zeros_like(original, dtype=bool)
+    roi_mask[:, 0, 0] = True
+    roi_mask[1, 2, 3] = True
+
+    raw_residual = original.astype(np.int32) - decoded.astype(np.int32)
+    background_residual = np.where(roi_mask, np.int32(0), raw_residual)
+
+    coords = np.array(np.where(roi_mask))
+    data = original[roi_mask].astype(np.uint16)
+    roi_info = {"coords": coords, "data": data, "shape": (n_frames, H, W)}
+
+    obj = _make_unsparz_for_streaming()
+    residual_iter = iter([(0, n_frames, background_residual.astype(np.int32), {})])
+    out = obj._apply_residual_and_roi_to_chunk(
+        decoded, 0, n_frames, residual_iter, roi_info, np.uint16, H, W
+    )
+    np.testing.assert_array_equal(out, original)
+
+
+def test_streaming_chunked_matches_eager_apply():
+    """Streaming chunk-by-chunk apply == single-shot apply on full arrays."""
+    rng = np.random.default_rng(13)
+    H, W = 5, 6
+    T = 10
+    chunk = 3
+    original = rng.integers(0, 4096, size=(T, H, W), dtype=np.uint16)
+    decoded = _make_decoded_with_loss(original, scale=2)
+
+    # Background-mode residual + ROI sparse from the same data
+    roi_mask = np.zeros_like(original, dtype=bool)
+    roi_mask[:, 0, 0] = True
+    roi_mask[3, 2, 4] = True
+    roi_mask[7, 4, 5] = True
+    raw_residual = original.astype(np.int32) - decoded.astype(np.int32)
+    background_residual = np.where(roi_mask, np.int32(0), raw_residual)
+    coords = np.array(np.where(roi_mask))
+    data = original[roi_mask].astype(np.uint16)
+    roi_info = {"coords": coords, "data": data, "shape": (T, H, W)}
+
+    obj = _make_unsparz_for_streaming()
+
+    # Build a residual iterator chunked in `chunk` frames at a time.
+    def residual_iter():
+        for t0 in range(0, T, chunk):
+            t1 = min(T, t0 + chunk)
+            yield t0, t1, background_residual[t0:t1].astype(np.int32), {}
+
+    res_it = residual_iter()
+    out_buf = np.empty_like(original)
+    for t0 in range(0, T, chunk):
+        t1 = min(T, t0 + chunk)
+        out_chunk = obj._apply_residual_and_roi_to_chunk(
+            decoded[t0:t1], t0, t1, res_it, roi_info, np.uint16, H, W
+        )
+        out_buf[t0:t1] = out_chunk
+
+    # Reference: one-shot apply via the existing helpers.
+    after_residual = apply_residuals(decoded, background_residual, np.uint16)
+    expected = np.where(roi_mask, original, after_residual)
+    np.testing.assert_array_equal(out_buf, expected)
+    # And of course it should equal the original
+    np.testing.assert_array_equal(out_buf, original)
+
+
+def test_streaming_apply_raises_on_residual_misalignment():
+    obj = _make_unsparz_for_streaming()
+    decoded = np.zeros((3, 2, 2), dtype=np.uint16)
+    # residual iterator yields a chunk that does not align
+    misaligned = iter([(1, 4, np.zeros((3, 2, 2), dtype=np.int32), {})])
+    try:
+        obj._apply_residual_and_roi_to_chunk(
+            decoded, 0, 3, misaligned, None, np.uint16, 2, 2
+        )
+    except ValueError as e:
+        assert "misaligned" in str(e)
+    else:
+        raise AssertionError("expected ValueError on residual chunk misalignment")
+
+
+def test_streaming_roi_only_chunk_no_residual():
+    """No residual but with ROI: should still patch ROI pixels exactly."""
+    obj = _make_unsparz_for_streaming()
+    H, W = 3, 3
+    decoded = np.full((2, H, W), 1234, dtype=np.uint16)
+    roi_mask = np.zeros_like(decoded, dtype=bool)
+    roi_mask[0, 1, 1] = True
+    roi_mask[1, 2, 2] = True
+    roi_values = np.array([5555, 7777], dtype=np.uint16)
+    coords = np.array(np.where(roi_mask))
+    roi_info = {"coords": coords, "data": roi_values, "shape": (2, H, W)}
+
+    out = obj._apply_residual_and_roi_to_chunk(
+        decoded, 0, 2, None, roi_info, np.uint16, H, W
+    )
+    # ROI pixels overwritten, others left as decoded
+    assert out[0, 1, 1] == 5555
+    assert out[1, 2, 2] == 7777
+    # Untouched pixel stays at decoded value
+    assert out[0, 0, 0] == 1234
+
+
+def test_streaming_apply_raises_when_residual_exhausts_early():
+    obj = _make_unsparz_for_streaming()
+    decoded = np.zeros((3, 2, 2), dtype=np.uint16)
+    empty_it = iter([])
+    try:
+        obj._apply_residual_and_roi_to_chunk(
+            decoded, 0, 3, empty_it, None, np.uint16, 2, 2
+        )
+    except ValueError as e:
+        assert "exhausted" in str(e)
+    else:
+        raise AssertionError("expected ValueError when residual exhausts early")
+
+
+# ---------------------------------------------------------------------------
+# UNSPARZ constructor: streaming flag plumbing
+# ---------------------------------------------------------------------------
+
+def test_unsparz_streaming_flag_default_true_in_signature():
+    import inspect
+    sig = inspect.signature(UNSPARZ.__init__)
+    assert "streaming" in sig.parameters
+    assert sig.parameters["streaming"].default is True
 
 
 class _FallbackMonkeypatch:
