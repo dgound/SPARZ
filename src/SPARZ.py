@@ -16,6 +16,8 @@ from dask import compute
 import gc
 from tqdm import tqdm
 import os
+import io
+import re
 import pandas as pd
 import json
 from dask import delayed
@@ -213,26 +215,222 @@ def restore_numeric_values(metadata: Dict) -> Dict:
     return restored_metadata
 
 #%%
+# ============================================================
+# Residual sidecar format
+# ============================================================
+# Binary container for the optional exact-reconstruction residual
+# layer used by near-lossless video codecs.
+#
+# Header layout (little-endian):
+#   magic                8 bytes   b"SPRZRS01"
+#   version              uint8     currently 1
+#   mode                 uint8     0=full, 1=background
+#   residual_dtype       uint8     0=int16, 1=int32
+#   flags                uint8     bit0=delta-across-frames, bit1=byte-shuffle
+#   shape                3 x int64 (T, H, W)
+#   orig_dtype_len       uint16    + UTF-8 bytes (e.g. "uint16")
+#   codec_len            uint16    + UTF-8 bytes
+#   compression_level    int32
+# Body: zstd-compressed residual bytes (after optional delta + shuffle).
+RESIDUAL_MAGIC = b"SPRZRS01"
+RESIDUAL_VERSION = 1
+RESIDUAL_MODE_FULL = 0
+RESIDUAL_MODE_BACKGROUND = 1
+RESIDUAL_DTYPE_INT16 = 0
+RESIDUAL_DTYPE_INT32 = 1
+RESIDUAL_SUFFIX = "_residual.zst"
+
+
+def _residual_shuffle_bytes(data: bytes, itemsize: int) -> bytes:
+    arr = np.frombuffer(data, dtype=np.uint8)
+    n = len(arr) // itemsize
+    if n == 0:
+        return data
+    return arr[:n * itemsize].reshape(n, itemsize).T.tobytes()
+
+
+def _residual_unshuffle_bytes(data: bytes, itemsize: int) -> bytes:
+    arr = np.frombuffer(data, dtype=np.uint8)
+    n = len(arr) // itemsize
+    if n == 0:
+        return data
+    return arr[:n * itemsize].reshape(itemsize, n).T.tobytes()
+
+
+def encode_residual_to_bytes(residual, original_dtype, mode, codec, compression_level,
+                             use_delta=True, use_shuffle=True, zstd_level=19):
+    """Encode a (T,H,W) residual array into a sidecar byte string."""
+    if mode not in ("full", "background"):
+        raise ValueError(f"unknown residual mode: {mode}")
+    residual = np.asarray(residual)
+    if residual.ndim != 3:
+        raise ValueError("residual must be 3D (T, H, W)")
+
+    res32 = residual.astype(np.int32, copy=False)
+    if res32.size and int(res32.min()) >= -32768 and int(res32.max()) <= 32767:
+        res = res32.astype(np.int16, copy=False)
+        dtype_code = RESIDUAL_DTYPE_INT16
+        itemsize = 2
+    else:
+        res = res32
+        dtype_code = RESIDUAL_DTYPE_INT32
+        itemsize = 4
+
+    if use_delta and res.shape[0] > 1:
+        delta = np.empty_like(res)
+        delta[0] = res[0]
+        delta[1:] = res[1:] - res[:-1]
+        body = delta.tobytes()
+    else:
+        use_delta = False
+        body = res.tobytes()
+
+    if use_shuffle:
+        body = _residual_shuffle_bytes(body, itemsize)
+
+    cctx = zstd.ZstdCompressor(level=zstd_level)
+    compressed = cctx.compress(body)
+
+    flags = 0
+    if use_delta:
+        flags |= 0x01
+    if use_shuffle:
+        flags |= 0x02
+    mode_code = RESIDUAL_MODE_BACKGROUND if mode == "background" else RESIDUAL_MODE_FULL
+
+    orig_dtype_bytes = np.dtype(original_dtype).name.encode("utf-8")
+    codec_bytes = str(codec).encode("utf-8")
+
+    header = bytearray()
+    header += RESIDUAL_MAGIC
+    header += bytes([RESIDUAL_VERSION, mode_code, dtype_code, flags])
+    header += np.array(res.shape, dtype=np.int64).tobytes()
+    header += len(orig_dtype_bytes).to_bytes(2, "little")
+    header += orig_dtype_bytes
+    header += len(codec_bytes).to_bytes(2, "little")
+    header += codec_bytes
+    header += int(compression_level).to_bytes(4, "little", signed=True)
+
+    return bytes(header) + compressed
+
+
+def decode_residual_from_bytes(buf):
+    """Inverse of encode_residual_to_bytes. Returns (residual_array, header_dict)."""
+    pos = 0
+    magic = bytes(buf[pos:pos + 8]); pos += 8
+    if magic != RESIDUAL_MAGIC:
+        raise ValueError(f"bad residual magic: {magic!r}")
+    version = buf[pos]; pos += 1
+    mode_code = buf[pos]; pos += 1
+    dtype_code = buf[pos]; pos += 1
+    flags = buf[pos]; pos += 1
+    shape = tuple(int(x) for x in np.frombuffer(buf[pos:pos + 24], dtype=np.int64))
+    pos += 24
+    n = int.from_bytes(buf[pos:pos + 2], "little"); pos += 2
+    orig_dtype = bytes(buf[pos:pos + n]).decode("utf-8"); pos += n
+    n = int.from_bytes(buf[pos:pos + 2], "little"); pos += 2
+    codec = bytes(buf[pos:pos + n]).decode("utf-8"); pos += n
+    compression_level = int.from_bytes(buf[pos:pos + 4], "little", signed=True); pos += 4
+
+    use_delta = bool(flags & 0x01)
+    use_shuffle = bool(flags & 0x02)
+    mode = "background" if mode_code == RESIDUAL_MODE_BACKGROUND else "full"
+    res_dtype = np.int16 if dtype_code == RESIDUAL_DTYPE_INT16 else np.int32
+    itemsize = np.dtype(res_dtype).itemsize
+
+    dctx = zstd.ZstdDecompressor()
+    body = dctx.decompress(bytes(buf[pos:]))
+
+    if use_shuffle:
+        body = _residual_unshuffle_bytes(body, itemsize)
+
+    res = np.frombuffer(body, dtype=res_dtype).reshape(shape).copy()
+    if use_delta and res.shape[0] > 1:
+        res = np.cumsum(res, axis=0).astype(res_dtype, copy=False)
+
+    header = {
+        "version": int(version),
+        "mode": mode,
+        "shape": shape,
+        "original_dtype": orig_dtype,
+        "residual_dtype": np.dtype(res_dtype).name,
+        "codec": codec,
+        "compression_level": compression_level,
+        "use_delta": use_delta,
+        "use_shuffle": use_shuffle,
+    }
+    return res, header
+
+
+def save_residual_sidecar(path, residual, original_dtype, mode, codec, compression_level,
+                          use_delta=True, use_shuffle=True, zstd_level=19):
+    data = encode_residual_to_bytes(
+        residual, original_dtype, mode, codec, compression_level,
+        use_delta=use_delta, use_shuffle=use_shuffle, zstd_level=zstd_level,
+    )
+    with open(path, "wb") as f:
+        f.write(data)
+
+
+def load_residual_sidecar(path):
+    with open(path, "rb") as f:
+        return decode_residual_from_bytes(f.read())
+
+
+def apply_residuals(decoded_frames, residual, original_dtype):
+    """Add residual to decoded frames and clip back to original dtype range."""
+    target = np.dtype(original_dtype)
+    out = decoded_frames.astype(np.int64, copy=False) + residual.astype(np.int64, copy=False)
+    if np.issubdtype(target, np.integer):
+        info = np.iinfo(target)
+        np.clip(out, info.min, info.max, out=out)
+    return out.astype(target, copy=False)
+
+
+def get_residual_path_for_video(video_path):
+    base, _ = os.path.splitext(video_path)
+    return base + RESIDUAL_SUFFIX
+
+
+def find_matching_sidecars_for_video(video_path, search_dir=None):
+    """Return {'npz': path|None, 'residual': path|None} for sidecars matching this video.
+
+    The .npz uses the original input stem (without the `_compression_level_N`
+    suffix); the residual sits next to the video and includes the level suffix.
+    """
+    video_dir = search_dir if search_dir is not None else os.path.dirname(video_path) or "."
+    video_base = os.path.splitext(os.path.basename(video_path))[0]
+    input_stem = re.sub(r"_compression_level_-?\d+$", "", video_base)
+    npz_path = os.path.join(video_dir, input_stem + ".npz")
+    res_path = os.path.join(video_dir, video_base + RESIDUAL_SUFFIX)
+    return {
+        "npz": npz_path if os.path.exists(npz_path) else None,
+        "residual": res_path if os.path.exists(res_path) else None,
+    }
+
+
 class SPARZIP:
-    def __init__(self, path_image_files1:str,  
-                 stem:str, 
+    def __init__(self, path_image_files1:str,
+                 stem:str,
                  output_path:str,
                  path_image_files2:str = None,
                  peaks_process:str = None,
-                 relative_threshold:float = 0.45, 
-                 epsilon:int = 12, 
-                 kernel_size:int = 9, 
+                 relative_threshold:float = 0.45,
+                 epsilon:int = 12,
+                 kernel_size:int = 9,
                 #  compression_level:int=0,
-                 batch_size:int=100, 
+                 batch_size:int=100,
                  stack_size:int=250,
-                 reflect_bp2:bool = False, 
+                 reflect_bp2:bool = False,
                  find_peaks:bool = True,
                  align_planes:bool=False,
                  num_workers:int=4,
                  num_dask_workers:int=2,
                  extract_metadata:bool=False,
                  create_single_file:bool=False,
-                 save_metadata_to_json:bool=False
+                 save_metadata_to_json:bool=False,
+                 save_residuals:bool=False,
+                 residual_mode:str="auto",
                  ):
       
         """
@@ -305,6 +503,10 @@ class SPARZIP:
         self.extract_metadata_flag = extract_metadata
         self.create_single_file = create_single_file
         self.save_metadata_to_json = save_metadata_to_json
+        self.save_residuals = save_residuals
+        if residual_mode not in ("auto", "full", "background"):
+            raise ValueError(f"residual_mode must be 'auto', 'full', or 'background'; got {residual_mode!r}")
+        self.residual_mode = residual_mode
         if reflect_bp2:
             if self.single_plane:
                 print('Skipping reflection on single plane data.')
@@ -1803,6 +2005,152 @@ class SPARZIP:
 
         return delta
 
+    def get_encoded_video_path(self, input_stem, compression_level, codec, custom_file_extension=None):
+        """Resolve the output video path for a given input stem and codec."""
+        if codec == "prores":
+            ext = "mov"
+        elif codec == "ffv1":
+            ext = "avi"
+        elif codec == "user":
+            ext = custom_file_extension or "mp4"
+        else:
+            ext = "mp4"
+        return f"{self.output_path}{input_stem}_compression_level_{compression_level}.{ext}"
+
+    def get_residual_path(self, video_path):
+        return get_residual_path_for_video(video_path)
+
+    def _decode_video_to_uint16(self, video_path):
+        """Decode an encoded video file synchronously into a (T,H,W) uint16 array."""
+        container = av.open(video_path)
+        try:
+            video_stream = container.streams.video[0]
+            frames = []
+            for frame in container.decode(video_stream):
+                frames.append(frame.to_ndarray(format="gray16le"))
+        finally:
+            container.close()
+        if not frames:
+            raise RuntimeError(f"no frames decoded from {video_path}")
+        return np.stack(frames, axis=0).astype(np.uint16, copy=False)
+
+    def _load_sparse_npz_dense(self, npz_path):
+        """Load a sparse NPZ saved by save_npz_with_metadata as a dense ndarray."""
+        try:
+            with open(npz_path, "rb") as f:
+                file_bytes = f.read()
+            if file_bytes[:4] == b"\x28\xb5\x2f\xfd":
+                dctx = zstd.ZstdDecompressor()
+                npz_data = np.load(io.BytesIO(dctx.decompress(file_bytes)), allow_pickle=True)
+            else:
+                npz_data = np.load(npz_path, allow_pickle=True)
+            if "encoding" in npz_data and str(npz_data["encoding"]) == "delta":
+                shape = tuple(int(x) for x in npz_data["shape"])
+                coords = np.cumsum(npz_data["delta_coords"], axis=1)
+                coo = sparse.COO(coords=coords, data=npz_data["data"], shape=shape)
+                return np.asarray(coo.todense())
+            if "data" in npz_data and "coords" in npz_data and "shape" in npz_data:
+                shape = tuple(int(x) for x in npz_data["shape"])
+                coo = sparse.COO(coords=npz_data["coords"], data=npz_data["data"], shape=shape)
+                return np.asarray(coo.todense())
+            coo = sparse.load_npz(npz_path)
+            if hasattr(coo, "todense"):
+                return np.asarray(coo.todense())
+            return np.asarray(coo)
+        except Exception as e:
+            print(f"  Warning: could not load sparse mask {npz_path}: {e}")
+            return None
+
+    def compute_residuals(self, original_frames, decoded_frames, mode, sparse_mask_dense=None):
+        """Compute residual = original - decoded; for 'background' mode zero ROI pixels."""
+        if original_frames.shape != decoded_frames.shape:
+            T = min(original_frames.shape[0], decoded_frames.shape[0])
+            original_frames = original_frames[:T]
+            decoded_frames = decoded_frames[:T]
+        residual = original_frames.astype(np.int32) - decoded_frames.astype(np.int32)
+        if mode == "background" and sparse_mask_dense is not None:
+            mask = sparse_mask_dense
+            if mask.shape != residual.shape:
+                print(f"  Warning: sparse mask shape {mask.shape} != residual {residual.shape}; not masking.")
+            else:
+                residual = np.where(mask != 0, np.int32(0), residual)
+        return residual
+
+    def save_residual_sidecar(self, path, residual, original_dtype, mode, codec, compression_level):
+        save_residual_sidecar(path, residual, original_dtype, mode, codec, compression_level)
+
+    def _resolve_residual_mode(self):
+        """Translate residual_mode + find_roi into a concrete mode."""
+        req = self.residual_mode
+        if req == "auto":
+            return "background" if self.find_roi else "full"
+        if req == "full" and self.find_roi:
+            print('  Note: residual_mode="full" with find_roi=True wastes space at ROI pixels; promoting to "background".')
+            return "background"
+        if req == "background" and not self.find_roi:
+            print('  Note: residual_mode="background" with find_roi=False has no ROI to skip; falling back to "full".')
+            return "full"
+        return req
+
+    def _save_residuals_for_run(self, codec, compression_level, custom_file_extension=None):
+        """After encode(), compute and save residual sidecars for each output video."""
+        if codec == "zstd":
+            print("Warning: residuals not supported for zstd codec; skipping.")
+            return
+        if codec == "ffv1":
+            print("Skipping residuals for ffv1 (codec is already 16-bit lossless).")
+            return
+        if codec == "user":
+            print("Warning: residuals not supported for user codec; skipping.")
+            return
+
+        mode = self._resolve_residual_mode()
+        print(f"Computing {mode} residuals from re-decoded videos...")
+
+        for k in range(len(self.bp1)):
+            in1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            video1 = self.get_encoded_video_path(in1, compression_level, codec, custom_file_extension)
+            self._save_one_residual(video1, k, plane="bp1", mode=mode,
+                                    codec=codec, compression_level=compression_level,
+                                    input_stem=in1)
+            if not self.single_plane:
+                in2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                video2 = self.get_encoded_video_path(in2, compression_level, codec, custom_file_extension)
+                self._save_one_residual(video2, k, plane="bp2", mode=mode,
+                                        codec=codec, compression_level=compression_level,
+                                        input_stem=in2)
+
+    def _save_one_residual(self, video_path, k, plane, mode, codec, compression_level, input_stem):
+        if not os.path.exists(video_path):
+            print(f"  Warning: video not found, skipping residual: {video_path}")
+            return
+        try:
+            decoded = self._decode_video_to_uint16(video_path)
+        except Exception as e:
+            print(f"  Warning: failed to decode {video_path} for residual: {e}")
+            return
+
+        original_block = self.bp1[k] if plane == "bp1" else self.bp2[k]
+        original = original_block.compute() if hasattr(original_block, "compute") else np.asarray(original_block)
+
+        sparse_mask = None
+        if mode == "background":
+            npz_path = os.path.join(self.output_path, input_stem + ".npz")
+            if os.path.exists(npz_path):
+                sparse_mask = self._load_sparse_npz_dense(npz_path)
+
+        residual = self.compute_residuals(original, decoded, mode, sparse_mask_dense=sparse_mask)
+        out_path = self.get_residual_path(video_path)
+        try:
+            self.save_residual_sidecar(out_path, residual, original.dtype, mode, codec, compression_level)
+            size_mb = os.path.getsize(out_path) / 1e6
+            print(f"  Saved residual: {os.path.basename(out_path)} ({size_mb:.2f} MB)")
+        except Exception as e:
+            print(f"  Warning: failed to save residual {out_path}: {e}")
+
+    def find_matching_sidecars_for_video(self, video_path):
+        return find_matching_sidecars_for_video(video_path, search_dir=self.output_path)
+
     def _save_with_zstd(self, filepath, data_dict, level=19):
         """Save data dictionary with zstd compression."""
         import io
@@ -1867,10 +2215,21 @@ class SPARZIP:
         video_files = (glob.glob(f'{self.output_path}*.mp4') +
                       glob.glob(f'{self.output_path}*.avi') +
                       glob.glob(f'{self.output_path}*.mov'))
+        residual_files = glob.glob(f'{self.output_path}*{RESIDUAL_SUFFIX}')
+        mkv_files = glob.glob(f'{self.output_path}*.mkv')
 
-        npz_size = sum(os.path.getsize(f) for f in npz_files) if npz_files else 0
-        video_size = sum(os.path.getsize(f) for f in video_files) if video_files else 0
-        total_size = npz_size + video_size
+        def _size(files):
+            return sum(os.path.getsize(f) for f in files) if files else 0
+
+        npz_size = _size(npz_files)
+        video_size = _size(video_files)
+        residual_size = _size(residual_files)
+        mkv_size = _size(mkv_files)
+
+        if self.create_single_file and mkv_size > 0:
+            total_size = mkv_size
+        else:
+            total_size = video_size + npz_size + residual_size
 
         # Estimate original size from dask arrays
         original_size = 0
@@ -1884,10 +2243,15 @@ class SPARZIP:
             pass
 
         print(f"\n=== Compression Statistics ===")
-        print(f"  Video files: {video_size / 1e6:.1f} MB ({len(video_files)} files)")
+        if video_size > 0:
+            print(f"  Video files:    {video_size / 1e6:.1f} MB ({len(video_files)} files)")
         if npz_size > 0:
-            print(f"  NPZ files:   {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
-        print(f"  Total:       {total_size / 1e6:.1f} MB")
+            print(f"  NPZ files:      {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
+        if residual_size > 0:
+            print(f"  Residual files: {residual_size / 1e6:.1f} MB ({len(residual_files)} files)")
+        if mkv_size > 0:
+            print(f"  MKV files:      {mkv_size / 1e6:.1f} MB ({len(mkv_files)} files)")
+        print(f"  Total:          {total_size / 1e6:.1f} MB")
         if original_size > 0 and total_size > 0:
             ratio = original_size / total_size
             print(f"  Compression ratio: {ratio:.1f}x")
@@ -1919,7 +2283,11 @@ class SPARZIP:
             self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95, compute_dict=compute_zstd_dict)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
-        
+
+        # Optional exact-reconstruction residual sidecars for video codecs
+        if self.save_residuals and codec in ('x265', 'av1', 'x264', 'prores', 'ffv1', 'zstd', 'user'):
+            self._save_residuals_for_run(codec, compression_level, custom_file_extension=custom_file_extension)
+
         # Create single MKV file if requested
         if self.create_single_file:
             self.package_to_mkv(codec, compression_level)
@@ -1987,77 +2355,66 @@ class SPARZIP:
             print('Warning: No video files found. Skipping MKV packaging.')
             return
         
-        # Find all NPZ files
-        npz_pattern = os.path.join(self.output_path, '*.npz')
-        npz_files = glob.glob(npz_pattern)
-        
-        if not npz_files:
-            print('Warning: No NPZ files found. Skipping MKV packaging.')
-            return
-        
-        # Create MKV files for each video file
+        # Create MKV files for each video file, attaching only matching sidecars
         import subprocess
         successful_count = 0
         failed_count = 0
-        
+
         for video_file, mkv_file in zip(video_files, mkv_files_to_create):
             try:
                 print(f'  Creating MKV: {os.path.basename(mkv_file)}...')
-                
-                # Build ffmpeg command manually for better control over attachments
+
+                # Per-video sidecar selection: only attach files matching this stem
+                sidecars = self.find_matching_sidecars_for_video(video_file)
+                attachments = [p for p in (sidecars.get('npz'), sidecars.get('residual')) if p]
+
                 cmd = [
-                    'ffmpeg', '-y',  # Overwrite output
-                    '-i', video_file,  # Input video
+                    'ffmpeg', '-y',
+                    '-i', video_file,
                 ]
-                
-                # Add NPZ files as attachments
-                for i, npz_file in enumerate(npz_files):
-                    cmd.extend(['-attach', npz_file])
-                    # Add metadata for each attachment
+
+                for i, attach_path in enumerate(attachments):
+                    cmd.extend(['-attach', attach_path])
                     cmd.extend(['-metadata:s:t:{}'.format(i), 'mimetype=application/octet-stream'])
-                    cmd.extend(['-metadata:s:t:{}'.format(i), 'filename={}'.format(os.path.basename(npz_file))])
-                
-                # Add output options
+                    cmd.extend(['-metadata:s:t:{}'.format(i), 'filename={}'.format(os.path.basename(attach_path))])
+
                 cmd.extend([
-                    '-c', 'copy',  # Copy streams without re-encoding
-                    '-map', '0:0',  # Map video stream from first input
-                    '-loglevel', 'error',  # Show only errors
-                    mkv_file  # Output file
+                    '-c', 'copy',
+                    '-map', '0:0',
+                    '-loglevel', 'error',
+                    mkv_file
                 ])
-                
-                # Run the command with timeout
+
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-                
+
                 if result.returncode != 0:
                     print(f'  ERROR: FFmpeg failed creating {os.path.basename(mkv_file)}')
                     print(f'  FFmpeg error: {result.stderr}')
                     failed_count += 1
-                    
-                    # Additional diagnostic for common errors
+
                     if 'moov atom not found' in result.stderr:
                         print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} is corrupted (missing moov atom)')
                     elif 'Invalid data found' in result.stderr:
                         print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} contains invalid data')
-                    
+
                     continue
-                
-                # Verify the output MKV file was created successfully
+
                 if not os.path.exists(mkv_file):
                     print(f'  ERROR: MKV file was not created: {mkv_file}')
                     failed_count += 1
                     continue
-                
+
                 mkv_size = os.path.getsize(mkv_file)
                 video_size = os.path.getsize(video_file)
-                
-                # MKV should be at least as large as the video (plus attachments)
+
                 if mkv_size < video_size:
                     print(f'  WARNING: MKV file seems too small ({mkv_size} bytes vs video {video_size} bytes)')
-                
+
                 successful_count += 1
+                attach_names = ', '.join(os.path.basename(p) for p in attachments) or 'none'
                 print(f'  SUCCESS: Created {os.path.basename(mkv_file)} ({mkv_size / (1024*1024):.1f} MB)')
                 print(f'    - Video: {os.path.basename(video_file)}')
-                print(f'    - Attachments: {len(npz_files)} NPZ files')
+                print(f'    - Attachments: {attach_names}')
                 
             except subprocess.TimeoutExpired:
                 print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
@@ -2081,25 +2438,33 @@ class SPARZIP:
 
 
 class UNSPARZ:
-    def __init__(self, path_sparse_bp1:str, 
-                 path_encoded_bp1:str, 
-                 stem:str, 
-                 output_path:str, 
-                 path_sparse_bp2:str=None, 
-                 path_encoded_bp2:str=None, 
-                 use_roi:bool=True, 
-                 chunk_size:int=10, 
-                 num_workers:int=4, 
+    def __init__(self, path_sparse_bp1:str,
+                 path_encoded_bp1:str,
+                 stem:str,
+                 output_path:str,
+                 path_sparse_bp2:str=None,
+                 path_encoded_bp2:str=None,
+                 use_roi:bool=True,
+                 chunk_size:int=10,
+                 num_workers:int=4,
                  num_dask_workers:int=2,
-                 output_format: str = 'tiff'):
-        
+                 output_format: str = 'tiff',
+                 use_residuals:bool=True,
+                 path_residual_bp1:str=None,
+                 path_residual_bp2:str=None):
+
         # Store original parameters
         original_path_sparse_bp1 = path_sparse_bp1
         original_path_sparse_bp2 = path_sparse_bp2
-        
+
         # Initialize temp directory tracking
         self.temp_dirs_to_cleanup = []
-        
+
+        # Residual configuration
+        self.use_residuals = use_residuals
+        self.path_residual_bp1 = path_residual_bp1
+        self.path_residual_bp2 = path_residual_bp2
+
         # Check if we have MKV files (single-file format)
         if path_encoded_bp1 and ('.mkv' in path_encoded_bp1 or glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))):
             # Handle direct MKV path or find MKV files
@@ -2107,7 +2472,7 @@ class UNSPARZ:
                 mkv_files = glob.glob(path_encoded_bp1)
             else:
                 mkv_files = glob.glob(path_encoded_bp1.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv'))
-            
+
             if mkv_files:
                 print(f'Detected MKV single-file format. Extracting components...')
                 self.path_encoded_bp1, self.path_encoded_bp2 = self.extract_from_mkv(mkv_files, path_encoded_bp2)
@@ -2120,19 +2485,13 @@ class UNSPARZ:
             # Traditional separate files
             self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
             self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
-        
+
         self.use_roi = use_roi
 
         self.output_format = output_format.lower()
         if self.output_format not in ['tiff', 'dat']:
             raise ValueError("output_format must be either 'tiff' or 'dat'")
 
-        # if path_encoded_bp2 is not None:
-        #     self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2))
-        # else:
-        #     self.path_encoded_bp2 = None
-        # self.encoded_bp1_files, self.encoded_bp2_files = sorted(glob.glob(path_encoded_bp1)), None
-        # self.use_zstd_dict = use_zstd_dict)
         if os.path.splitext(self.path_encoded_bp1[0])[1] == '.zst':
             if self.use_roi:
                 print('ROI detection is not supported for Zstandard compressed files. Ignoring use_roi flag.')
@@ -2140,16 +2499,16 @@ class UNSPARZ:
             self.encoded_bp1, self.encoded_bp2 = self.decode_zst(path_encoded_bp1, path_encoded_bp2)
         else:
             self.encoded_bp1, self.encoded_bp2 = self.decode(path_encoded_bp1, path_encoded_bp2)
+
+        # Apply optional residual sidecars before any ROI patching
+        if self.use_residuals and os.path.splitext(self.path_encoded_bp1[0])[1] != '.zst':
+            self._autodetect_residual_paths()
+            self._apply_residuals_to_encoded()
+
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
         if self.use_roi:
             self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2,self.shapes)
-            # print ('Loaded sparse matrices.')
-            # print (self.sparse_bp1)
-            # print (self.sparse_bp1[0].shape)
             self.processed_bp1, self.processed_bp2 = self.process_frames()
-            # print ('Processed frames.')
-            # print (self.processed_bp1)
-            # print (self.processed_bp1[0].shape)
         self.stem = stem
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
@@ -2273,30 +2632,52 @@ class UNSPARZ:
             except Exception as e:
                 print(f'Unexpected error extracting from MKV {mkv_file}: {e}')
         
-        # Update sparse file paths to point to extracted NPZ files
+        # Update sparse and residual file paths from extracted attachments
         if extracted_video_paths:
             temp_dir = os.path.dirname(extracted_video_paths[0])
-            # Check for NPZ files in temp directory
-            npz_files = glob.glob(os.path.join(temp_dir, '*.npz'))
-            if npz_files:
-                print(f'Found {len(npz_files)} NPZ files in temp directory')
-                self.path_sparse_bp1 = os.path.join(temp_dir, '*.npz')
-            else:
-                # If no NPZ in temp, check the MKV directory itself
-                mkv_dir = os.path.dirname(mkv_files[0])
-                npz_files = glob.glob(os.path.join(mkv_dir, '*.npz'))
+            search_dirs = [temp_dir, os.path.dirname(mkv_files[0])]
+
+            npz_files = []
+            residual_files = []
+            for d in search_dirs:
+                if not d:
+                    continue
+                if not npz_files:
+                    npz_files = glob.glob(os.path.join(d, '*.npz'))
+                if not residual_files:
+                    residual_files = glob.glob(os.path.join(d, '*' + RESIDUAL_SUFFIX))
                 if npz_files:
-                    print(f'Using {len(npz_files)} NPZ files from MKV directory')
-                    self.path_sparse_bp1 = os.path.join(mkv_dir, '*.npz')
-                else:
-                    print('Warning: No NPZ files found')
-                    self.path_sparse_bp1 = None
-            
+                    sparse_dir = d
+                    break
+            else:
+                sparse_dir = temp_dir
+
+            if npz_files:
+                print(f'Found {len(npz_files)} NPZ files for sparse ROI')
+                self.path_sparse_bp1 = os.path.join(sparse_dir, '*.npz')
+            else:
+                print('Warning: No NPZ files found')
+                self.path_sparse_bp1 = None
+
             if path_encoded_bp2:
-                self.path_sparse_bp2 = os.path.join(temp_dir, '*bp2*.npz')  # Assume BP2 files have 'bp2' in name
+                self.path_sparse_bp2 = os.path.join(sparse_dir, '*bp2*.npz')
             else:
                 self.path_sparse_bp2 = None
-        
+
+            # Resolve per-video residual paths (only set when we found residual sidecars)
+            if residual_files:
+                print(f'Found {len(residual_files)} residual sidecar(s) in MKV attachments')
+                bp1_residuals = []
+                bp2_residuals = []
+                for video_path in extracted_video_paths:
+                    sidecars = find_matching_sidecars_for_video(video_path,
+                                                                search_dir=os.path.dirname(video_path))
+                    bp1_residuals.append(sidecars.get('residual'))
+                if any(bp1_residuals):
+                    self.path_residual_bp1 = bp1_residuals
+                if path_encoded_bp2 and any(bp2_residuals):
+                    self.path_residual_bp2 = bp2_residuals
+
         return extracted_video_paths, None
 
     def cleanup_temp_directories(self):
@@ -2854,6 +3235,74 @@ class UNSPARZ:
     def _delta_decode_coords(self, delta_coords):
         """Decode delta-encoded coordinates."""
         return np.cumsum(delta_coords, axis=1)
+
+    def load_residual_sidecar(self, path):
+        """Load and decode a residual sidecar file. Returns (residual_array, header_dict)."""
+        return load_residual_sidecar(path)
+
+    def apply_residuals(self, decoded_frames, residual, original_dtype):
+        return apply_residuals(decoded_frames, residual, original_dtype)
+
+    def _resolve_residual_paths(self, attr_name, expected_videos):
+        """Normalize self.<attr_name> into a list aligned with expected_videos length, or None."""
+        val = getattr(self, attr_name)
+        if val is None:
+            return None
+        if isinstance(val, str):
+            matched = sorted(glob.glob(val))
+            return matched if matched else None
+        if isinstance(val, (list, tuple)):
+            return list(val)
+        return None
+
+    def _autodetect_residual_paths(self):
+        """Populate self.path_residual_bp1/bp2 from sibling files when not explicitly set."""
+        # bp1
+        if self.path_residual_bp1 is None:
+            candidates = []
+            for vp in self.path_encoded_bp1:
+                rp = get_residual_path_for_video(vp)
+                candidates.append(rp if os.path.exists(rp) else None)
+            if any(candidates):
+                self.path_residual_bp1 = candidates
+        else:
+            self.path_residual_bp1 = self._resolve_residual_paths('path_residual_bp1', self.path_encoded_bp1)
+
+        # bp2
+        if self.path_encoded_bp2 is not None and self.path_residual_bp2 is None:
+            candidates = []
+            for vp in self.path_encoded_bp2:
+                rp = get_residual_path_for_video(vp)
+                candidates.append(rp if os.path.exists(rp) else None)
+            if any(candidates):
+                self.path_residual_bp2 = candidates
+        elif self.path_encoded_bp2 is not None:
+            self.path_residual_bp2 = self._resolve_residual_paths('path_residual_bp2', self.path_encoded_bp2)
+
+    def _apply_residuals_to_encoded(self):
+        """Replace decoded dask arrays with residual-corrected versions where available."""
+        def _apply_to_list(encoded_list, residual_paths):
+            if not residual_paths:
+                return
+            for k in range(len(encoded_list)):
+                if k >= len(residual_paths) or not residual_paths[k]:
+                    continue
+                try:
+                    res, header = self.load_residual_sidecar(residual_paths[k])
+                except Exception as e:
+                    print(f'  Warning: failed to load residual {residual_paths[k]}: {e}')
+                    continue
+                arr = encoded_list[k]
+                decoded = arr.compute() if hasattr(arr, 'compute') else np.asarray(arr)
+                T = min(decoded.shape[0], res.shape[0])
+                corrected = self.apply_residuals(decoded[:T], res[:T], header['original_dtype'])
+                encoded_list[k] = da.from_array(corrected, chunks=(1, *corrected.shape[1:]))
+                print(f'  Applied residual ({header["mode"]}) from {os.path.basename(residual_paths[k])}')
+
+        if self.path_residual_bp1:
+            _apply_to_list(self.encoded_bp1, self.path_residual_bp1)
+        if self.path_residual_bp2 and self.encoded_bp2 is not None:
+            _apply_to_list(self.encoded_bp2, self.path_residual_bp2)
 
     def load_sparse(self,sparse_bp1:str, sparse_bp2:str, shapes:tuple):
         print ('Loading sparse matrices...')
