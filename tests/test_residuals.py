@@ -1419,7 +1419,7 @@ def test_load_original_metadata_accepts_list_with_none(tmp_path):
 
 def test_load_original_metadata_prefers_attached_json_sidecar(tmp_path):
     """FFV1 MKVs can carry metadata JSON even when there is no ROI NPZ."""
-    metadata_path = tmp_path / "movieA_metadata_bp1.json"
+    metadata_path = tmp_path / "movieA_compression_level_0_metadata_bp1.json"
     metadata_path.write_text(json.dumps([{
         "tags": {"Software": "ffv1-sidecar"},
         "is_encoded": False,
@@ -1434,6 +1434,23 @@ def test_load_original_metadata_prefers_attached_json_sidecar(tmp_path):
     assert metadata_bp1[0]["tags"]["Software"] == "ffv1-sidecar"
 
 
+def test_attached_json_metadata_preserves_video_slots(tmp_path):
+    """A missing sidecar for video 0 must not shift video 1 metadata into slot 0."""
+    metadata_path = tmp_path / "movieB_compression_level_0_metadata_bp1.json"
+    metadata_path.write_text(json.dumps([{
+        "tags": {"Software": "video-1-sidecar"},
+        "is_encoded": False,
+    }]))
+
+    obj = _make_unsparz_for_metadata(tmp_path, sparse_bp1=None)
+    obj.path_metadata_bp1 = [None, str(metadata_path)]
+    obj.path_metadata_bp2 = None
+
+    metadata_bp1, _metadata_bp2 = obj.load_original_metadata()
+    assert metadata_bp1[0] == {}
+    assert metadata_bp1[1]["tags"]["Software"] == "video-1-sidecar"
+
+
 def test_write_mkv_metadata_sidecar_matches_video_stem(tmp_path):
     """Per-video JSON sidecars are named so MKV extraction can match them by stem."""
     obj = SPARZIP.__new__(SPARZIP)
@@ -1442,9 +1459,13 @@ def test_write_mkv_metadata_sidecar_matches_video_stem(tmp_path):
     obj.metadata_bp1 = [{"tags": {"Software": "bp1-meta"}}]
     obj.metadata_bp2 = None
 
-    path = obj._write_mkv_metadata_sidecar("movieA", "bp1", 0)
-    assert path.endswith("movieA_metadata_bp1.json")
+    dataset_json = tmp_path / "movieA_metadata_bp1.json"
+    dataset_json.write_text(json.dumps([{"tags": {"Software": "dataset-meta"}}]))
+
+    path = obj._write_mkv_metadata_sidecar("movieA_compression_level_0", "bp1", 0)
+    assert path.endswith("movieA_compression_level_0_metadata_bp1.json")
     assert os.path.exists(path)
+    assert json.loads(dataset_json.read_text())[0]["tags"]["Software"] == "dataset-meta"
 
     matched = sparz_mod.find_metadata_sidecars_for_video(
         str(tmp_path / "movieA_compression_level_0.mkv"),

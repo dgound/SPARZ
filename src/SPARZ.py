@@ -783,8 +783,9 @@ def find_metadata_sidecars_for_video(video_path, search_dir=None):
 
     FFV1 single-file archives may have no ROI NPZ to carry embedded metadata,
     so SPARZIP attaches a per-video JSON sidecar named
-    ``<input_stem>_metadata_bp{1,2}.json``. Prefer that exact stem match; fall
-    back to a single metadata JSON in the directory for backward compatibility
+    ``<video_stem>_metadata_bp{1,2}.json``. Prefer that exact stem match, then
+    accept the older ``<input_stem>_metadata_bp{1,2}.json`` form, and finally
+    fall back to a single metadata JSON in the directory for compatibility
     with dataset-level ``<stem>_metadata_bp{1,2}.json`` files.
     """
     video_dir = search_dir if search_dir is not None else os.path.dirname(video_path) or "."
@@ -793,9 +794,14 @@ def find_metadata_sidecars_for_video(video_path, search_dir=None):
 
     out = {}
     for plane in ("bp1", "bp2"):
-        exact = os.path.join(video_dir, f"{input_stem}_metadata_{plane}.json")
-        if os.path.exists(exact):
-            out[plane] = exact
+        for exact in (
+            os.path.join(video_dir, f"{video_base}_metadata_{plane}.json"),
+            os.path.join(video_dir, f"{input_stem}_metadata_{plane}.json"),
+        ):
+            if os.path.exists(exact):
+                out[plane] = exact
+                break
+        if plane in out:
             continue
         matches = sorted(glob.glob(os.path.join(video_dir, f"*_metadata_{plane}.json")))
         out[plane] = matches[0] if len(matches) == 1 else None
@@ -2827,7 +2833,7 @@ class SPARZIP:
                 print(f'Error saving BP2 metadata to {metadata_file_bp2}: {e}')
         return written
 
-    def _write_mkv_metadata_sidecar(self, input_stem, plane, index):
+    def _write_mkv_metadata_sidecar(self, video_stem, plane, index):
         """Write a per-video metadata JSON sidecar for MKV attachment."""
         if not self.extract_metadata_flag:
             return None
@@ -2837,7 +2843,7 @@ class SPARZIP:
         metadata_entry = metadata_list[index]
         if not metadata_entry:
             return None
-        out_path = os.path.join(self.output_path, f'{input_stem}_metadata_{plane}.json')
+        out_path = os.path.join(self.output_path, f'{video_stem}_metadata_{plane}.json')
         try:
             with open(out_path, 'w') as f:
                 json.dump(serialize_metadata([metadata_entry]), f, indent=4)
@@ -3016,8 +3022,9 @@ class SPARZIP:
                 sidecars = self.find_matching_sidecars_for_video(video_file)
                 attachments = [p for p in (sidecars.get('npz'), sidecars.get('residual')) if p]
                 if self.extract_metadata_flag and (codec == 'ffv1' or self.save_metadata_to_json):
+                    video_stem = os.path.splitext(os.path.basename(video_file))[0]
                     metadata_path = self._write_mkv_metadata_sidecar(
-                        entry['input_stem'], entry['plane'], entry['index']
+                        video_stem, entry['plane'], entry['index']
                     )
                     if metadata_path:
                         attachments.append(metadata_path)
@@ -3701,26 +3708,46 @@ class UNSPARZ:
         """Load one or more JSON metadata files into a metadata list."""
         if not maybe_paths:
             return None
+
+        def _load_one(path):
+            try:
+                with open(path, 'r') as f:
+                    loaded = json.load(f)
+                print(f'Loaded metadata for {label} from: {path}')
+                if isinstance(loaded, list):
+                    return loaded
+                if isinstance(loaded, dict):
+                    return [loaded]
+            except Exception as e:
+                print(f'Error loading metadata from JSON file {path}: {e}')
+            return []
+
         if isinstance(maybe_paths, (list, tuple)):
-            files = [p for p in maybe_paths if p and os.path.exists(p)]
-        else:
-            files = sorted(glob.glob(maybe_paths)) if any(ch in str(maybe_paths) for ch in "*?[") else [maybe_paths]
-            files = [p for p in files if p and os.path.exists(p)]
+            metadata = []
+            loaded_any = False
+            for path in maybe_paths:
+                if not path or not os.path.exists(path):
+                    metadata.append({})
+                    continue
+                entries = _load_one(path)
+                if entries:
+                    # Per-video sidecar lists must preserve one output slot per
+                    # video. Sidecars written by SPARZIP contain one metadata
+                    # entry; if a user supplies more, keep the first for this slot.
+                    metadata.append(entries[0])
+                    loaded_any = True
+                else:
+                    metadata.append({})
+            return metadata if loaded_any else None
+
+        files = sorted(glob.glob(maybe_paths)) if any(ch in str(maybe_paths) for ch in "*?[") else [maybe_paths]
+        files = [p for p in files if p and os.path.exists(p)]
         if not files:
             return None
 
         metadata = []
         for path in files:
-            try:
-                with open(path, 'r') as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, list):
-                    metadata.extend(loaded)
-                elif isinstance(loaded, dict):
-                    metadata.append(loaded)
-                print(f'Loaded metadata for {label} from: {path}')
-            except Exception as e:
-                print(f'Error loading metadata from JSON file {path}: {e}')
+            metadata.extend(_load_one(path))
         return metadata if metadata else None
 
     def load_original_metadata(self):
