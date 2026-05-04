@@ -3322,10 +3322,13 @@ class UNSPARZ:
         """
         print(f'Extracting from MKV: {mkv_file}')
         mkv_dir = os.path.dirname(mkv_file)
-        temp_dir = os.path.join(mkv_dir or '.', 'mkv_temp')
-        os.makedirs(temp_dir, exist_ok=True)
-        if temp_dir not in self.temp_dirs_to_cleanup:
-            self.temp_dirs_to_cleanup.append(temp_dir)
+        import tempfile
+        temp_root = os.path.join(mkv_dir or '.', 'mkv_temp')
+        os.makedirs(temp_root, exist_ok=True)
+        mkv_stem = os.path.splitext(os.path.basename(mkv_file))[0]
+        safe_stem = re.sub(r'[^A-Za-z0-9_.-]+', '_', mkv_stem).strip('._') or 'mkv'
+        temp_dir = tempfile.mkdtemp(prefix=f'{safe_stem}_', dir=temp_root)
+        self.temp_dirs_to_cleanup.append(temp_dir)
 
         # Probe codec to pick a compatible container/extension.
         codec_name = None

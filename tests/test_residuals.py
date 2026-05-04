@@ -655,12 +655,12 @@ def test_wire_sidecars_passes_partial_npz_list_through(tmp_path):
 
 
 def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
-    """_extract_one_mkv picks sidecars whose stems match the extracted video.
+    """_extract_one_mkv uses a fresh temp dir and stem-matched sidecars.
 
     We cannot run ffmpeg/ffprobe in unit tests, so we stub them out: the codec
-    probe returns ``None`` (which maps to ``.mkv``), the attachment extractor
-    is a no-op, and we pre-create the extracted ``.mkv`` so the "already
-    extracted" branch fires instead of invoking real ffmpeg.
+    probe returns ``None`` (which maps to ``.mkv``), video extraction creates
+    a dummy output, and the attachment extractor writes only this MKV's
+    sidecars into the fresh temp directory.
     """
     obj = _make_unsparz_for_extract()
     mkv_dir = tmp_path / "mkvs"
@@ -668,35 +668,56 @@ def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
     mkv_file = mkv_dir / "movieA_compression_level_0.mkv"
     mkv_file.write_bytes(b"")
 
-    temp_dir = mkv_dir / "mkv_temp"
-    temp_dir.mkdir()
-    # Codec probe falls back to ``("mkv", "matroska")`` for unknown codecs,
-    # so the extracted video lands here as ``.mkv`` (not ``.mp4``).
-    video_path = temp_dir / "movieA_compression_level_0.mkv"
-    video_path.write_bytes(b"")
-    (temp_dir / "movieA.npz").write_bytes(b"")
-    (temp_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
-    # Decoy sidecars with a different stem must NOT be picked up.
-    (temp_dir / "movieB.npz").write_bytes(b"")
-    (temp_dir / ("movieB_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
-    (temp_dir / "movieB_compression_level_0_metadata_bp1.json").write_text(
+    stale_root = mkv_dir / "mkv_temp"
+    stale_root.mkdir()
+    stale_video = stale_root / "movieA_compression_level_0.mkv"
+    stale_video.write_bytes(b"stale")
+    (stale_root / "movieA_compression_level_0_metadata_bp1.json").write_text(
+        json.dumps([{"tags": {"Software": "stale-metadata"}}])
+    )
+    (stale_root / "movieB_compression_level_0_metadata_bp1.json").write_text(
         json.dumps([{"tags": {"Software": "wrong-video"}}])
     )
 
+    def _fake_extract_attachments(_self, _mkv_file, temp_dir):
+        temp_dir_path = os.path.abspath(temp_dir)
+        with open(os.path.join(temp_dir_path, "movieA.npz"), "wb") as f:
+            f.write(b"")
+        with open(os.path.join(temp_dir_path, "movieA_compression_level_0" + RESIDUAL_SUFFIX), "wb") as f:
+            f.write(b"")
+        return 1, 1
+
     # Stub out the ffmpeg pieces so no subprocess is launched.
     import types
-    obj._extract_mkv_attachments = types.MethodType(lambda self, m, t: (0, 0), obj)
+    obj._extract_mkv_attachments = types.MethodType(_fake_extract_attachments, obj)
 
     import SPARZ as _sparz
     real_probe = _sparz.ffmpeg.probe
+    real_input = _sparz.ffmpeg.input
     _sparz.ffmpeg.probe = lambda *_a, **_kw: {"streams": []}
+
+    class _FakeFfmpegInput:
+        def output(self, output_path, *_args, **_kwargs):
+            self.output_path = output_path
+            return self
+
+        def run(self, *_args, **_kwargs):
+            with open(self.output_path, "wb") as f:
+                f.write(b"fresh")
+
+    _sparz.ffmpeg.input = lambda *_a, **_kw: _FakeFfmpegInput()
     try:
         record = obj._extract_one_mkv(str(mkv_file))
     finally:
         _sparz.ffmpeg.probe = real_probe
+        _sparz.ffmpeg.input = real_input
 
-    assert record["video"] == str(video_path)
+    assert record["video"] != str(stale_video)
+    assert os.path.basename(record["video"]) == "movieA_compression_level_0.mkv"
+    assert os.path.dirname(record["video"]) == record["temp_dir"]
+    assert record["temp_dir"] in obj.temp_dirs_to_cleanup
     assert record["npz"].endswith("movieA.npz")
+    assert os.path.dirname(record["npz"]) == record["temp_dir"]
     assert os.path.basename(record["residual"]).startswith("movieA")
     assert record["metadata_bp1"] is None
 
