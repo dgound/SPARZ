@@ -634,17 +634,23 @@ def test_wire_sidecars_from_records_aligns_per_plane(tmp_path):
     assert obj.path_residual_bp2[0].endswith("movie1B_compression_level_0_residual.zst")
 
 
-def test_wire_sidecars_warns_on_missing_npz(tmp_path, capsys):
+def test_wire_sidecars_passes_partial_npz_list_through(tmp_path):
+    """Partial NPZ coverage now passes a per-video list through with None gaps.
+
+    This lets per-video codec-aware validation decide whether each missing
+    NPZ is acceptable (e.g. ffv1 doesn't need one). Older behaviour would
+    set path_sparse_bp1 to None on any gap, which over-rejected ffv1 inputs.
+    """
     obj = _make_unsparz_for_extract()
     records = [
-        {"video": str(tmp_path / "a.mp4"), "npz": str(tmp_path / "a.npz"), "residual": None},
-        {"video": str(tmp_path / "b.mp4"), "npz": None, "residual": None},
+        {"video": str(tmp_path / "a.mp4"), "npz": str(tmp_path / "a.npz"),
+         "residual": None, "codec": "x265"},
+        {"video": str(tmp_path / "b.mkv"), "npz": None,
+         "residual": None, "codec": "ffv1"},
     ]
     obj._wire_sidecars_from_records(records, plane="bp1")
-    out = capsys.readouterr().out if hasattr(capsys, "readouterr") else ""
-    assert obj.path_sparse_bp1 is None  # partial NPZ coverage -> disabled
-    if out:
-        assert "1/2 NPZ" in out or "partial" in out.lower() or "warning" in out.lower()
+    assert obj.path_sparse_bp1 == [records[0]["npz"], None]
+    assert obj._codec_bp1 == ["x265", "ffv1"]
 
 
 def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
@@ -747,15 +753,19 @@ def test_container_for_mkv_video_codec_picks_correct_extension():
 
 def _make_unsparz_for_validation(use_roi, path_encoded_bp1, path_encoded_bp2=None,
                                  path_sparse_bp1=None, path_sparse_bp2=None,
-                                 path_residual_bp1=None, path_residual_bp2=None):
+                                 path_residual_bp1=None, path_residual_bp2=None,
+                                 use_residuals=True):
     obj = UNSPARZ.__new__(UNSPARZ)
     obj.use_roi = use_roi
+    obj.use_residuals = use_residuals
     obj.path_encoded_bp1 = list(path_encoded_bp1)
     obj.path_encoded_bp2 = list(path_encoded_bp2) if path_encoded_bp2 else None
     obj.path_sparse_bp1 = path_sparse_bp1
     obj.path_sparse_bp2 = path_sparse_bp2
     obj.path_residual_bp1 = path_residual_bp1
     obj.path_residual_bp2 = path_residual_bp2
+    obj._codec_bp1 = None
+    obj._codec_bp2 = None
     return obj
 
 
@@ -987,6 +997,273 @@ def test_unsparz_streaming_flag_default_true_in_signature():
     sig = inspect.signature(UNSPARZ.__init__)
     assert "streaming" in sig.parameters
     assert sig.parameters["streaming"].default is True
+
+
+# ---------------------------------------------------------------------------
+# True streaming TIFF writer
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_tiff_writer():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.use_roi = False
+    obj.use_residuals = False
+    obj.streaming = True
+    obj.chunk_size = 4
+    obj.output_format = "tiff"
+    return obj
+
+
+def test_streaming_tiff_does_not_allocate_full_output(tmp_path, monkeypatch):
+    """The streaming TIFF path must not allocate ``np.empty((T, H, W))``.
+
+    We replace ``np.empty`` with a tracker and assert that no full-stack
+    allocation goes through the streaming path.
+    """
+    obj = _make_unsparz_for_tiff_writer()
+    T, H, W = 6, 3, 4
+    rng = np.random.default_rng(99)
+    frames = rng.integers(0, 4096, size=(T, H, W), dtype=np.uint16)
+
+    def _chunks():
+        for t0 in range(0, T, 2):
+            t1 = min(T, t0 + 2)
+            yield t0, t1, frames[t0:t1].copy()
+
+    real_empty = np.empty
+    saw_full_alloc = {"hit": False}
+
+    def tracking_empty(shape, dtype=None, *args, **kwargs):
+        # Flag any allocation with the full-T leading dimension.
+        if isinstance(shape, tuple) and len(shape) == 3:
+            if shape[0] == T and shape[1] == H and shape[2] == W:
+                saw_full_alloc["hit"] = True
+        return real_empty(shape, dtype=dtype, *args, **kwargs)
+
+    monkeypatch.setattr(np, "empty", tracking_empty)
+    out = tmp_path / "stream.tiff"
+    obj._write_streaming_tiff(str(out), _chunks(), T, H, W, np.uint16, file_metadata={})
+    assert saw_full_alloc["hit"] is False, "_write_streaming_tiff allocated np.empty((T,H,W))"
+
+    # And the file should round-trip equal.
+    import tifffile as _tf
+    written = _tf.imread(str(out))
+    np.testing.assert_array_equal(written, frames)
+
+
+def test_streaming_tiff_preserves_basic_metadata(tmp_path):
+    """Description / Software extratag / resolution should be on the first page."""
+    obj = _make_unsparz_for_tiff_writer()
+    T, H, W = 3, 2, 2
+    frames = np.arange(T * H * W, dtype=np.uint16).reshape(T, H, W)
+
+    def _chunks():
+        yield 0, T, frames.copy()
+
+    file_metadata = {
+        # Synthetic resolution so the helper produces non-empty output
+        'tags': {
+            'XResolution': [4242, 1],
+            'YResolution': [4242, 1],
+            'ResolutionUnit': 2,
+            # Software is tag 305; format_metadata_for_tifffile should turn
+            # this into an extratag.
+            'Software': 'SPARZ-streaming-test',
+            'ImageDescription': 'SPARZ streaming smoke test',
+        },
+    }
+
+    out = tmp_path / "meta.tiff"
+    obj._write_streaming_tiff(str(out), _chunks(), T, H, W, np.uint16, file_metadata=file_metadata)
+
+    import tifffile as _tf
+    with _tf.TiffFile(str(out)) as tf:
+        assert len(tf.pages) == T
+        first = tf.pages[0]
+        # Description / metadata land on page 0.
+        desc = first.tags.get('ImageDescription')
+        assert desc is not None
+        # Resolution was passed through.
+        x_res = first.tags.get('XResolution')
+        y_res = first.tags.get('YResolution')
+        assert x_res is not None
+        assert y_res is not None
+
+
+def test_streaming_tiff_uses_bigtiff_for_large_output(tmp_path, monkeypatch):
+    """When projected raw size exceeds ~4 GB we should pass bigtiff=True to TiffWriter."""
+    obj = _make_unsparz_for_tiff_writer()
+    # Pretend we're writing a huge file by lying about the dims; we never
+    # actually allocate one — TiffWriter's constructor is what we want to
+    # observe, so we intercept it.
+    import tifffile as _tf
+    seen = {"bigtiff": None}
+    real_writer = _tf.TiffWriter
+
+    class _SpyWriter(real_writer):
+        def __init__(self, path, bigtiff=False, *a, **kw):
+            seen["bigtiff"] = bool(bigtiff)
+            super().__init__(path, bigtiff=bigtiff, *a, **kw)
+
+    monkeypatch.setattr(_tf, "TiffWriter", _SpyWriter)
+
+    T = 3
+    H = W = 2
+    frames = np.zeros((T, H, W), dtype=np.uint16)
+
+    def _chunks():
+        yield 0, T, frames
+
+    # Estimated size = T*H*W*2 = 24 bytes — small file.
+    out_small = tmp_path / "small.tiff"
+    obj._write_streaming_tiff(str(out_small), _chunks(), T, H, W, np.uint16, file_metadata={})
+    assert seen["bigtiff"] is False
+
+    # Now lie about T to force the BigTIFF branch (T*H*W*itemsize > 4GB).
+    seen["bigtiff"] = None
+    big_T = 2 * 1024 * 1024 * 1024  # 2G frames at 2x2x2 bytes = 8 GB projected
+    big_frames = np.zeros((1, H, W), dtype=np.uint16)
+
+    def _one_chunk():
+        # Yield only one frame so we don't actually iterate billions.
+        yield 0, 1, big_frames
+
+    # Patch TiffWriter to also short-circuit the actual write to keep the
+    # test fast — we only care that bigtiff was decided correctly.
+    class _NopWriter:
+        def __init__(self, path, bigtiff=False, *a, **kw):
+            seen["bigtiff"] = bool(bigtiff)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def write(self, *a, **kw):
+            pass
+
+    monkeypatch.setattr(_tf, "TiffWriter", _NopWriter)
+    out_big = tmp_path / "big.tiff"
+    obj._write_streaming_tiff(str(out_big), _one_chunk(), big_T, H, W, np.uint16, file_metadata={})
+    assert seen["bigtiff"] is True
+
+
+# ---------------------------------------------------------------------------
+# FFV1 MKV does not require ROI sidecars
+# ---------------------------------------------------------------------------
+
+def test_validate_mkv_sidecars_ffv1_without_npz_passes(tmp_path):
+    """ffv1 is truly lossless; missing NPZ should be tolerated."""
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[str(tmp_path / "movieA_compression_level_0.mkv")],
+        path_sparse_bp1=None,  # no NPZ at all
+    )
+    obj._codec_bp1 = ["ffv1"]
+    # Should not raise.
+    obj._validate_mkv_sidecars()
+
+
+def test_validate_mkv_sidecars_lossy_without_npz_still_raises(tmp_path):
+    """Same situation but lossy codec → ROI sidecar still required."""
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[str(tmp_path / "movieA_compression_level_0.mp4")],
+        path_sparse_bp1=None,
+    )
+    obj._codec_bp1 = ["hevc"]
+    try:
+        obj._validate_mkv_sidecars()
+    except ValueError as e:
+        assert "ROI" in str(e) or "use_roi" in str(e)
+    else:
+        raise AssertionError("expected ValueError for lossy codec without NPZ")
+
+
+def test_validate_mkv_sidecars_mixed_codec_per_video(tmp_path):
+    """Per-video rule: ffv1 video can lack NPZ, lossy video next to it cannot."""
+    npzA = tmp_path / "movieA.npz"; npzA.write_bytes(b"")
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[
+            str(tmp_path / "movieA_compression_level_0.mp4"),  # lossy: needs NPZ ✓
+            str(tmp_path / "movieB_compression_level_0.mkv"),  # ffv1: NPZ optional
+        ],
+        path_sparse_bp1=[str(npzA), None],
+    )
+    obj._codec_bp1 = ["x265", "ffv1"]
+    obj._validate_mkv_sidecars()  # passes
+
+    # Now make the lossy video the one without NPZ — must raise.
+    obj2 = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[
+            str(tmp_path / "movieA_compression_level_0.mp4"),  # lossy with no NPZ
+            str(tmp_path / "movieB_compression_level_0.mkv"),  # ffv1
+        ],
+        path_sparse_bp1=[None, None],
+    )
+    obj2._codec_bp1 = ["x265", "ffv1"]
+    try:
+        obj2._validate_mkv_sidecars()
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError when lossy video lacks NPZ")
+
+
+# ---------------------------------------------------------------------------
+# use_residuals=False skips residual validation
+# ---------------------------------------------------------------------------
+
+def test_validate_mkv_sidecars_skips_residual_check_when_use_residuals_false(tmp_path):
+    """Partial residual list must not raise when the user disabled residuals."""
+    npz1 = tmp_path / "movieA.npz"; npz1.write_bytes(b"")
+    npz2 = tmp_path / "movieB.npz"; npz2.write_bytes(b"")
+    res1 = tmp_path / ("movieA_compression_level_0" + RESIDUAL_SUFFIX); res1.write_bytes(b"")
+
+    obj = _make_unsparz_for_validation(
+        use_roi=True,
+        path_encoded_bp1=[
+            str(tmp_path / "movieA_compression_level_0.mp4"),
+            str(tmp_path / "movieB_compression_level_0.mp4"),
+        ],
+        path_sparse_bp1=[str(npz1), str(npz2)],
+        path_residual_bp1=[str(res1), None],  # advertised but partial
+    )
+    obj._codec_bp1 = ["x265", "x265"]
+    obj.use_residuals = False  # opt out
+    obj._validate_mkv_sidecars()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Biplane count consistency
+# ---------------------------------------------------------------------------
+
+def test_validate_count_consistency_biplane_mismatch_raises():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.path_encoded_bp1 = ["/tmp/a1.mp4", "/tmp/a2.mp4"]
+    obj.path_encoded_bp2 = ["/tmp/b1.mp4"]  # only 1
+    obj.use_roi = False
+    try:
+        obj._validate_count_consistency()
+    except ValueError as e:
+        assert "BP1" in str(e) and "BP2" in str(e)
+    else:
+        raise AssertionError("expected ValueError on biplane count mismatch")
+
+
+def test_validate_count_consistency_matched_passes():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.path_encoded_bp1 = ["/tmp/a1.mp4", "/tmp/a2.mp4"]
+    obj.path_encoded_bp2 = ["/tmp/b1.mp4", "/tmp/b2.mp4"]
+    obj.use_roi = False
+    obj._validate_count_consistency()  # no raise
+
+
+def test_validate_count_consistency_single_plane_passes():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.path_encoded_bp1 = ["/tmp/a1.mp4"]
+    obj.path_encoded_bp2 = None
+    obj.use_roi = False
+    obj._validate_count_consistency()  # no raise
 
 
 class _FallbackMonkeypatch:

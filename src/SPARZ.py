@@ -3052,6 +3052,8 @@ class UNSPARZ:
 
         # Check if we have MKV files (single-file format)
         self._mkv_extracted = False
+        self._codec_bp1 = None
+        self._codec_bp2 = None
         if self._looks_like_mkv_input(path_encoded_bp1):
             mkv_files = self._resolve_mkv_files(path_encoded_bp1)
             if not mkv_files:
@@ -3059,15 +3061,20 @@ class UNSPARZ:
             print(f'Detected MKV single-file format. Extracting components...')
             self.path_encoded_bp1, self.path_encoded_bp2 = self.extract_from_mkv(mkv_files, path_encoded_bp2)
             # extract_from_mkv populated path_sparse_<plane> / path_residual_<plane>
+            # and self._codec_<plane>.
             path_sparse_bp1 = self.path_sparse_bp1
             path_sparse_bp2 = self.path_sparse_bp2
             self._mkv_extracted = True
+            # Catch BP1/BP2 count mismatches before we run any sidecar checks.
+            self._validate_count_consistency()
             # Fail fast on missing required sidecars rather than passing None downstream.
             self._validate_mkv_sidecars()
         else:
             # Traditional separate files
             self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
             self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
+            # Catch obvious user mistakes in the non-MKV path too.
+            self._validate_count_consistency()
 
         self.output_format = output_format.lower()
         if self.output_format not in ['tiff', 'dat']:
@@ -3272,30 +3279,43 @@ class UNSPARZ:
             "residual": sidecars["residual"],
             "temp_dir": temp_dir,
             "mkv_dir": mkv_dir,
+            "codec": codec_name,
         }
 
     def _extract_mkv_group(self, mkv_files):
         """Extract a group of MKV files (one plane). Returns a list of records."""
         return [self._extract_one_mkv(m) for m in mkv_files]
 
+    @staticmethod
+    def _is_truly_lossless_codec(codec_name):
+        """Return True for codecs that preserve all bits and so don't need an ROI sidecar."""
+        return (codec_name or "").lower() == "ffv1"
+
     def _wire_sidecars_from_records(self, records, plane):
-        """Assign per-plane path_sparse / path_residual based on stem-matched records."""
+        """Assign per-plane path_sparse / path_residual / _codec from MKV records.
+
+        Sparse paths are exposed as a per-video list (with possible ``None``
+        gaps) when at least one NPZ is present. Validation later decides on a
+        per-video basis whether a missing NPZ is acceptable (truly lossless
+        codecs like ffv1 don't need one).
+        """
         npz_paths = [r["npz"] for r in records]
         res_paths = [r["residual"] for r in records]
+        codec_list = [r.get("codec") for r in records]
         n_npz = sum(1 for p in npz_paths if p)
         n_res = sum(1 for p in res_paths if p)
         print(f'  {plane}: matched {n_npz} NPZ and {n_res} residual sidecar(s) '
               f'to {len(records)} video(s)')
 
-        if n_npz == len(records) and len(records) > 0:
-            sparse_paths = npz_paths
-        elif n_npz > 0:
-            print(f'  Warning: only {n_npz}/{len(records)} NPZ sidecars found for {plane}; '
-                  'use_roi will be unavailable for this plane')
-            sparse_paths = None
+        setattr(self, f'_codec_{plane}', codec_list)
+
+        # Pass the per-video list through (with None entries for missing NPZ)
+        # so per-video validation can apply codec-aware rules. Set to None
+        # only when no NPZ at all was found.
+        if n_npz > 0:
+            setattr(self, f'path_sparse_{plane}', npz_paths)
         else:
-            sparse_paths = None
-        setattr(self, f'path_sparse_{plane}', sparse_paths)
+            setattr(self, f'path_sparse_{plane}', None)
 
         # Only override an explicitly-provided path_residual_<plane> when we
         # found at least one residual. None entries (gaps) survive into the
@@ -3352,8 +3372,35 @@ class UNSPARZ:
 
         return bp1_videos, bp2_videos
 
+    def _validate_count_consistency(self):
+        """Check that BP1/BP2 video counts match before any output is written.
+
+        Catches the case where a user passes mismatched globs/lists or where
+        a biplane MKV pair has missing files — the streaming run() would
+        otherwise write BP1 and crash on BP2 indexing.
+        """
+        if not self.path_encoded_bp1:
+            raise ValueError("No encoded video files were resolved for BP1")
+        if self.path_encoded_bp2 is None:
+            return
+        n1 = len(self.path_encoded_bp1)
+        n2 = len(self.path_encoded_bp2)
+        if n1 != n2:
+            raise ValueError(
+                f"Biplane reconstruction requires matching BP1/BP2 video counts; "
+                f"got {n1} BP1 vs {n2} BP2"
+            )
+
     def _validate_mkv_sidecars(self):
         """Verify that MKV-extracted sidecars cover what reconstruction will need.
+
+        ROI requirement is per-video and codec-aware: truly lossless codecs
+        (currently only ffv1) reconstruct from the video stream alone and do
+        not need an NPZ sidecar; lossy codecs (x265/x264/av1/prores) still
+        require NPZ when ``use_roi=True``.
+
+        Residual validation is gated on ``self.use_residuals`` — a user that
+        opts out should not be blocked by a partial residual attachment.
 
         Raises ``ValueError`` with a clear plane/path message rather than
         passing ``None`` or partial lists down to ``load_sparse`` /
@@ -3362,24 +3409,48 @@ class UNSPARZ:
         n1 = len(self.path_encoded_bp1)
         n2 = len(self.path_encoded_bp2) if self.path_encoded_bp2 else 0
 
+        def _per_video_codec_list(plane, n_videos):
+            codecs = getattr(self, f'_codec_{plane}', None)
+            if not codecs:
+                return [None] * n_videos
+            if len(codecs) < n_videos:
+                return list(codecs) + [None] * (n_videos - len(codecs))
+            return list(codecs)
+
         def _check_roi(plane, n_videos, sparse_paths, video_paths):
-            if not sparse_paths:
-                raise ValueError(
-                    f"MKV reconstruction with use_roi=True needs the {plane} sparse "
-                    f"ROI sidecar(s) (.npz), but none were extracted. Set use_roi=False "
-                    f"to reconstruct background-only, or re-package the MKV with the "
-                    f"sidecar attached."
+            codecs = _per_video_codec_list(plane, n_videos)
+            if isinstance(sparse_paths, str):
+                resolved = self._resolve_paths(sparse_paths)
+                # Glob with N matches: align by index.
+                resolved = list(resolved) + [None] * max(0, n_videos - len(resolved))
+            elif isinstance(sparse_paths, (list, tuple)):
+                resolved = list(sparse_paths) + [None] * max(0, n_videos - len(sparse_paths))
+            else:
+                resolved = [None] * n_videos
+
+            lossless_skipped = 0
+            missing_lossy = []
+            for i, video in enumerate(video_paths):
+                npz = resolved[i] if i < len(resolved) else None
+                if self._is_truly_lossless_codec(codecs[i]):
+                    if not npz or not os.path.exists(npz):
+                        lossless_skipped += 1
+                    continue
+                if not npz or not os.path.exists(npz):
+                    missing_lossy.append(video)
+
+            if lossless_skipped:
+                print(
+                    f"  {plane}: {lossless_skipped} ffv1 video(s) without an ROI sidecar "
+                    f"— reconstructing from video stream only (codec is truly lossless)"
                 )
-            resolved = self._resolve_paths(sparse_paths)
-            if len(resolved) < n_videos:
-                missing_for = video_paths[len(resolved):]
+            if missing_lossy:
                 raise ValueError(
-                    f"{plane} has {n_videos} video(s) but only {len(resolved)} ROI "
-                    f"sidecar(s) were extracted; missing for: {missing_for}"
+                    f"{plane} reconstruction with use_roi=True needs an ROI sidecar (.npz) "
+                    f"for each lossy video, but it is missing for: {missing_lossy}. "
+                    f"Set use_roi=False to reconstruct background-only, or re-package "
+                    f"the MKV with the sidecar attached."
                 )
-            missing = [p for p in resolved if not os.path.exists(p)]
-            if missing:
-                raise ValueError(f"Missing {plane} ROI sidecar(s): {missing}")
 
         if self.use_roi:
             _check_roi("bp1", n1, self.path_sparse_bp1, self.path_encoded_bp1)
@@ -3413,9 +3484,13 @@ class UNSPARZ:
             if absent_on_disk:
                 raise ValueError(f"Missing {plane} residual sidecar(s): {absent_on_disk}")
 
-        _check_residuals("bp1", n1, self.path_residual_bp1, self.path_encoded_bp1)
-        if self.path_encoded_bp2:
-            _check_residuals("bp2", n2, self.path_residual_bp2, self.path_encoded_bp2)
+        # Honour use_residuals: skip residual validation entirely when the
+        # caller opted out, so a partial residual attachment in the MKV can't
+        # block reconstruction.
+        if self.use_residuals:
+            _check_residuals("bp1", n1, self.path_residual_bp1, self.path_encoded_bp1)
+            if self.path_encoded_bp2:
+                _check_residuals("bp2", n2, self.path_residual_bp2, self.path_encoded_bp2)
 
     def cleanup_temp_directories(self):
         """
@@ -4569,16 +4644,13 @@ class UNSPARZ:
                                 file_metadata, debug_prefix=""):
         """Drive the chunk generator and write to ``self.output_format``.
 
-        TIFF: allocate the final output buffer, fill via streaming chunks, then
-        hand off to ``write_tiff_file`` which knows how to embed metadata.
+        TIFF: stream pages directly into ``tifffile.TiffWriter``; never
+        allocates a full ``(T, H, W)`` buffer.
         DAT: stream raw bytes incrementally — never holds more than one chunk.
         """
         if self.output_format == "tiff":
-            target_dtype = np.dtype(original_dtype)
-            out = np.empty((T, H, W), dtype=target_dtype)
-            for start, end, chunk in chunks_gen:
-                out[start:end] = chunk
-            self.write_tiff_file(filename, out, file_metadata, debug_prefix=debug_prefix)
+            self._write_streaming_tiff(filename, chunks_gen, T, H, W, original_dtype,
+                                       file_metadata, debug_prefix=debug_prefix)
         elif self.output_format == "dat":
             target_dtype = np.dtype(original_dtype)
             with open(filename, "wb") as f:
@@ -4586,6 +4658,115 @@ class UNSPARZ:
                     f.write(np.ascontiguousarray(chunk, dtype=target_dtype).tobytes())
         else:
             raise ValueError(f"Unsupported output_format: {self.output_format}")
+
+    def _write_streaming_tiff(self, filename, chunks_gen, T, H, W, original_dtype,
+                              file_metadata, debug_prefix=""):
+        """Stream-write a multi-page TIFF without ever allocating ``(T, H, W)``.
+
+        Memory: one chunk in flight at a time, plus tifffile's internal page
+        buffer (one page).
+
+        Reuses existing metadata helpers:
+            * ``extract_resolution_from_metadata`` for X/Y resolution + unit
+            * ``format_metadata_for_tifffile`` for description + extratags on the first page
+            * ``fix_ome_xml_for_output`` to rewrite OME-XML for the new file
+            * ``_detect_individual_ifd_variation`` flag drives per-frame extratags
+
+        Note: very rare metadata branches handled by ``write_tiff_file`` /
+        ``write_tiff_with_individual_ifds`` (e.g. exotic individual-IFD tag
+        types beyond ``int / float / str / int_array``) follow the same code
+        path used by the eager writer; this is the streaming counterpart of
+        ``write_tiff_with_individual_ifds`` and they share the same per-frame
+        extratag construction logic.
+        """
+        target_dtype = np.dtype(original_dtype)
+        requires_individual_writing = bool(file_metadata.get('requires_individual_ifd_writing'))
+        individual_ifds = file_metadata.get('individual_ifds', []) if requires_individual_writing else []
+
+        # First-page metadata pieces.
+        resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
+        description, extratags_first = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+        # If OME-XML exists, rewrite filename/UUID for this output.
+        if file_metadata.get('is_ome') and 'ome_xml' in file_metadata:
+            original_ome = file_metadata['ome_xml']
+            fixed_ome = self.fix_ome_xml_for_output(original_ome, filename, T)
+            description = fixed_ome or original_ome
+
+        # BigTIFF if the projected raw size exceeds the 4 GB classic limit.
+        estimated_size = int(T) * int(H) * int(W) * target_dtype.itemsize
+        use_bigtiff = estimated_size > 4 * 1024 * 1024 * 1024
+        if use_bigtiff:
+            print(f"{debug_prefix}Writing BigTIFF (estimated {estimated_size/1e9:.1f} GB): {filename}")
+
+        def _frame_extratags_individual(frame_idx):
+            """Per-frame extratags for the requires_individual_ifd_writing branch."""
+            if frame_idx >= len(individual_ifds):
+                return None
+            ifd_data = individual_ifds[frame_idx]
+            frame_tags = ifd_data.get('tags', {})
+            extras = []
+            for tag_name, tag_value in frame_tags.items():
+                if not (tag_name.startswith('tag_') and tag_name[4:].isdigit()):
+                    continue
+                tag_code = int(tag_name[4:])
+                # Skip basic TIFF tags that are written automatically.
+                if tag_code in (256, 257, 258, 259, 262, 270, 273, 277, 278, 279, 282, 283, 296):
+                    continue
+                if isinstance(tag_value, int):
+                    extras.append((tag_code, 'I', 1, tag_value, True))
+                elif isinstance(tag_value, float):
+                    extras.append((tag_code, 's', 0, str(tag_value), True))
+                elif isinstance(tag_value, str):
+                    extras.append((tag_code, 's', 0, tag_value, True))
+                elif isinstance(tag_value, (list, tuple)) and tag_value:
+                    if isinstance(tag_value[0], int):
+                        extras.append((tag_code, 'I', len(tag_value), tag_value, True))
+                    elif isinstance(tag_value[0], float):
+                        extras.append((tag_code, 's', 0, ','.join(str(v) for v in tag_value), True))
+            return extras or None
+
+        frame_count = 0
+        with tifffile.TiffWriter(filename, bigtiff=use_bigtiff) as tw:
+            for start, end, chunk in chunks_gen:
+                if chunk.dtype != target_dtype:
+                    chunk = chunk.astype(target_dtype, copy=False)
+                for j in range(chunk.shape[0]):
+                    frame_idx = start + j
+                    frame = chunk[j]
+                    if frame_idx == 0:
+                        # Description, extratags, resolution all go on the first page.
+                        kwargs = {
+                            'photometric': 'minisblack',
+                        }
+                        if description:
+                            kwargs['description'] = description
+                        if requires_individual_writing:
+                            per_frame_extras = _frame_extratags_individual(frame_idx) or []
+                        else:
+                            per_frame_extras = list(extratags_first or [])
+                        if per_frame_extras:
+                            kwargs['extratags'] = per_frame_extras
+                        if resolution:
+                            kwargs['resolution'] = resolution
+                            kwargs['resolutionunit'] = resolution_unit
+                        tw.write(frame, **kwargs)
+                    else:
+                        if requires_individual_writing:
+                            # Per-frame extratags differ — cannot be contiguous;
+                            # tifffile will emit a fresh IFD per page.
+                            kwargs = {'photometric': 'minisblack'}
+                            per_frame_extras = _frame_extratags_individual(frame_idx)
+                            if per_frame_extras:
+                                kwargs['extratags'] = per_frame_extras
+                            tw.write(frame, **kwargs)
+                        else:
+                            # Bulk pages share metadata with page 0; contiguous=True
+                            # keeps them in one TIFF series so readers like
+                            # ``tifffile.imread`` return a single (T, H, W) array.
+                            tw.write(frame, contiguous=True)
+                    frame_count += 1
+        if frame_count != T:
+            print(f"{debug_prefix}Warning: wrote {frame_count} pages but expected {T} for {filename}")
 
     def _run_streaming(self):
         """Streaming-reconstruction driver. Memory bound: one chunk + final output."""
