@@ -3113,6 +3113,16 @@ class UNSPARZ:
                 self._apply_residuals_to_encoded()
 
         self.shapes = [x.shape[:3] for x in self.encoded_bp1]
+
+        # Eager (streaming=False) load_sparse cannot deal with per-video None
+        # gaps, so adjust use_roi here based on the codec mix. This must run
+        # before load_sparse below.
+        if self.use_roi and not self.streaming and self._mkv_extracted:
+            self._adjust_roi_for_eager_mode()
+            # _adjust_roi_for_eager_mode may have flipped use_roi off.
+            path_sparse_bp1 = self.path_sparse_bp1
+            path_sparse_bp2 = self.path_sparse_bp2
+
         if self.use_roi and not self.streaming:
             self.sparse_bp1, self.sparse_bp2 = self.load_sparse(path_sparse_bp1, path_sparse_bp2, self.shapes)
             self.processed_bp1, self.processed_bp2 = self.process_frames()
@@ -3372,6 +3382,63 @@ class UNSPARZ:
 
         return bp1_videos, bp2_videos
 
+    def _adjust_roi_for_eager_mode(self):
+        """Reconcile use_roi with the per-plane sparse list for streaming=False.
+
+        The eager ``load_sparse`` requires a complete list/glob of NPZ paths.
+        Per-video lists with ``None`` gaps (legitimate for ffv1 videos) cannot
+        flow through it. Decide:
+
+        - All videos in every plane lack NPZ AND every video is truly lossless
+          → silently disable ``use_roi`` (and print a notice).
+        - Some videos have NPZ and some lossless videos legitimately don't
+          → raise ``ValueError`` recommending ``streaming=True`` (per-video ROI
+          handling). We refuse to silently drop ROI for the lossy videos.
+        - Otherwise (all NPZ present) → no change.
+        """
+        def _plane_state(plane):
+            sparse_list = getattr(self, f'path_sparse_{plane}')
+            codecs = getattr(self, f'_codec_{plane}', None) or []
+            if sparse_list is None:
+                # No NPZ at all in this plane.
+                return {
+                    'all_none': True,
+                    'has_gaps': False,
+                    'all_lossless': bool(codecs) and all(self._is_truly_lossless_codec(c) for c in codecs),
+                }
+            if isinstance(sparse_list, (list, tuple)):
+                has_gap = any(p is None for p in sparse_list)
+                return {
+                    'all_none': all(p is None for p in sparse_list),
+                    'has_gaps': has_gap,
+                    'all_lossless': bool(codecs) and all(self._is_truly_lossless_codec(c) for c in codecs),
+                }
+            return {'all_none': False, 'has_gaps': False, 'all_lossless': False}
+
+        bp1 = _plane_state('bp1')
+        bp2 = _plane_state('bp2') if self.path_encoded_bp2 else {
+            'all_none': True, 'has_gaps': False, 'all_lossless': True,
+        }
+
+        # Case 1: every plane has zero ROI sidecars and all its videos are ffv1.
+        if (bp1['all_none'] and bp1['all_lossless']
+                and bp2['all_none'] and bp2['all_lossless']):
+            print('  Note: Disabling use_roi (eager mode) — all videos are ffv1 (truly lossless); '
+                  'reconstructing from video stream only.')
+            self.use_roi = False
+            return
+
+        # Case 2: any plane has ROI gaps (some NPZ present, some missing) →
+        # eager load_sparse can't represent this safely.
+        if bp1['has_gaps'] or bp2['has_gaps']:
+            raise ValueError(
+                "streaming=False (eager) cannot reconstruct a mix of videos with "
+                "and without ROI sidecars in the same plane. Use streaming=True "
+                "for per-video ROI handling, or re-package the MKV so every video "
+                "has a matching .npz."
+            )
+        # Otherwise (all NPZ present) — leave as is.
+
     def _validate_count_consistency(self):
         """Check that BP1/BP2 video counts match before any output is written.
 
@@ -3594,26 +3661,27 @@ class UNSPARZ:
         print('No JSON metadata found. Trying to load from NPZ files...')
         metadata_bp1 = []
         try:
-            if hasattr(self, 'path_sparse_bp1') and self.path_sparse_bp1:
-                bp1_pattern = self.path_sparse_bp1
-            else:
-                bp1_pattern = os.path.join(self.output_path, '*.npz')
-            bp1_files = sorted(glob.glob(bp1_pattern))
-            
+            bp1_files = self._collect_npz_paths(getattr(self, 'path_sparse_bp1', None))
+
             for npz_file in bp1_files:
                 if '_bp2_' in npz_file or npz_file.endswith('_bp2.npz'):
                     continue
                 metadata_entry = self.load_metadata_from_npz(npz_file)
                 if metadata_entry:
                     metadata_bp1.append(metadata_entry)
-            
+
             if metadata_bp1:
                 print(f'Loaded BP1 metadata from {len(metadata_bp1)} NPZ files')
-            
+
             # BP2 logic
             if self.path_encoded_bp2:
                 metadata_bp2 = []
-                bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
+                bp2_paths = getattr(self, 'path_sparse_bp2', None)
+                if bp2_paths is not None:
+                    bp2_files = self._collect_npz_paths(bp2_paths)
+                else:
+                    # Legacy fallback: peek into bp1's directory for "_bp2_" files
+                    bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
                 for npz_file in sorted(bp2_files):
                     metadata_entry = self.load_metadata_from_npz(npz_file)
                     if metadata_entry:
@@ -4255,12 +4323,36 @@ class UNSPARZ:
 
     @staticmethod
     def _resolve_paths(maybe_paths):
-        """Accept either a glob string or a list of file paths and return a sorted list."""
+        """Resolve a glob string or list/tuple to a flat sorted list of paths.
+
+        ``None`` entries in a list (e.g. per-video sparse lists with gaps for
+        ffv1 videos that have no NPZ) are filtered out — the result is the set
+        of *existing* paths. For per-video positional access use
+        ``_roi_npz_path_for_index`` instead, which preserves indices.
+        """
         if maybe_paths is None:
             return []
         if isinstance(maybe_paths, (list, tuple)):
-            return sorted(maybe_paths)
+            non_none = [p for p in maybe_paths if p is not None]
+            return sorted(non_none)
         return sorted(glob.glob(maybe_paths))
+
+    def _collect_npz_paths(self, sparse_attr_value):
+        """Collect actual NPZ file paths from a glob string or per-video list.
+
+        Tolerates ``None`` and lists with ``None`` gaps; falls back to scanning
+        ``self.output_path`` when nothing concrete is supplied. Used for
+        metadata discovery, where positional alignment with videos is not
+        required.
+        """
+        if sparse_attr_value is None:
+            fallback = os.path.join(getattr(self, 'output_path', '') or '.', '*.npz')
+            return sorted(glob.glob(fallback))
+        if isinstance(sparse_attr_value, (list, tuple)):
+            existing = [p for p in sparse_attr_value if p and os.path.exists(p)]
+            return sorted(existing)
+        # Glob string
+        return sorted(glob.glob(sparse_attr_value))
 
 
     # def load_mp4(self, file_path):
@@ -4627,10 +4719,23 @@ class UNSPARZ:
         return None
 
     def _roi_npz_path_for_index(self, sparse_paths, k):
+        """Return the per-video sparse NPZ path at index ``k`` (or ``None``).
+
+        For list/tuple inputs the list is treated as already-aligned with
+        ``self.path_encoded_*``; ``None`` entries are returned as-is so the
+        streaming path can transparently skip ROI for that video. We do NOT
+        sort or filter the list — callers depend on positional alignment.
+        """
         if sparse_paths is None:
             return None
-        resolved = self._resolve_paths(sparse_paths)
-        return resolved[k] if k < len(resolved) else None
+        if isinstance(sparse_paths, (list, tuple)):
+            return sparse_paths[k] if k < len(sparse_paths) else None
+        if isinstance(sparse_paths, str):
+            # Glob strings: resolve and sort; positional alignment is by
+            # filename order (matches existing UNSPARZ behaviour).
+            matched = sorted(glob.glob(sparse_paths))
+            return matched[k] if k < len(matched) else None
+        return None
 
     def _original_dtype_for(self, residual_path):
         if residual_path and os.path.exists(residual_path):
@@ -4686,6 +4791,19 @@ class UNSPARZ:
         # First-page metadata pieces.
         resolution, resolution_unit = self.extract_resolution_from_metadata(file_metadata)
         description, extratags_first = self.format_metadata_for_tifffile(file_metadata, frame_index=0)
+        # tifffile rejects extratag 305 (Software) and falls back to writing
+        # ``Software=tifffile.py``. Extract it and pass via the ``software=``
+        # kwarg instead, which TiffWriter does honour.
+        software_str = None
+        if extratags_first:
+            kept = []
+            for et in extratags_first:
+                if et and et[0] == 305:
+                    if len(et) > 3 and isinstance(et[3], (str, bytes)):
+                        software_str = et[3] if isinstance(et[3], str) else et[3].decode('utf-8', 'replace')
+                else:
+                    kept.append(et)
+            extratags_first = kept
         # If OME-XML exists, rewrite filename/UUID for this output.
         if file_metadata.get('is_ome') and 'ome_xml' in file_metadata:
             original_ome = file_metadata['ome_xml']
@@ -4749,6 +4867,10 @@ class UNSPARZ:
                         if resolution:
                             kwargs['resolution'] = resolution
                             kwargs['resolutionunit'] = resolution_unit
+                        if software_str:
+                            # tifffile writes tag 305 from this kwarg without
+                            # the warnings extratag 305 produces.
+                            kwargs['software'] = software_str
                         tw.write(frame, **kwargs)
                     else:
                         if requires_individual_writing:

@@ -1,4 +1,5 @@
 """Helper-level tests for the SPARZ residual sidecar layer."""
+import json
 import os
 import sys
 
@@ -1264,6 +1265,242 @@ def test_validate_count_consistency_single_plane_passes():
     obj.path_encoded_bp2 = None
     obj.use_roi = False
     obj._validate_count_consistency()  # no raise
+
+
+# ---------------------------------------------------------------------------
+# _roi_npz_path_for_index — list with None gaps
+# ---------------------------------------------------------------------------
+
+def test_roi_npz_path_for_index_list_with_none():
+    """Per-video lists must be indexed positionally, not sorted (which would crash on None)."""
+    obj = UNSPARZ.__new__(UNSPARZ)
+    paths = ["/tmp/a.npz", None]
+    assert obj._roi_npz_path_for_index(paths, 0) == "/tmp/a.npz"
+    assert obj._roi_npz_path_for_index(paths, 1) is None
+    # Out-of-range index returns None instead of crashing.
+    assert obj._roi_npz_path_for_index(paths, 5) is None
+
+
+def test_roi_npz_path_for_index_none_input():
+    obj = UNSPARZ.__new__(UNSPARZ)
+    assert obj._roi_npz_path_for_index(None, 0) is None
+
+
+def test_roi_npz_path_for_index_glob_string_resolves_and_sorts(tmp_path):
+    obj = UNSPARZ.__new__(UNSPARZ)
+    a = tmp_path / "a.npz"; a.write_bytes(b"")
+    b = tmp_path / "b.npz"; b.write_bytes(b"")
+    pattern = str(tmp_path / "*.npz")
+    # Glob resolution sorts alphabetically.
+    assert obj._roi_npz_path_for_index(pattern, 0).endswith("a.npz")
+    assert obj._roi_npz_path_for_index(pattern, 1).endswith("b.npz")
+
+
+def test_resolve_paths_filters_none_entries():
+    """_resolve_paths is used for flat collections; None entries should be filtered."""
+    paths = ["/tmp/a.npz", None, "/tmp/b.npz"]
+    resolved = UNSPARZ._resolve_paths(paths)
+    assert resolved == sorted(["/tmp/a.npz", "/tmp/b.npz"])
+
+
+# ---------------------------------------------------------------------------
+# FFV1 + streaming=False eager mode
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_eager_adjustment(use_roi=True, codec_bp1=None, codec_bp2=None,
+                                       sparse_bp1=None, sparse_bp2=None,
+                                       has_bp2=False):
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.use_roi = use_roi
+    obj._mkv_extracted = True
+    obj.path_encoded_bp1 = ["/tmp/a.mkv"] if codec_bp1 and len(codec_bp1) == 1 else \
+                            [f"/tmp/a{i}.mkv" for i in range(len(codec_bp1 or []))]
+    obj.path_encoded_bp2 = ["/tmp/b.mkv"] if has_bp2 and codec_bp2 and len(codec_bp2) == 1 else \
+                            ([f"/tmp/b{i}.mkv" for i in range(len(codec_bp2 or []))] if has_bp2 else None)
+    obj.path_sparse_bp1 = sparse_bp1
+    obj.path_sparse_bp2 = sparse_bp2
+    obj._codec_bp1 = codec_bp1
+    obj._codec_bp2 = codec_bp2
+    return obj
+
+
+def test_eager_adjust_disables_roi_when_all_ffv1_no_npz():
+    obj = _make_unsparz_for_eager_adjustment(
+        use_roi=True, codec_bp1=["ffv1", "ffv1"], sparse_bp1=None,
+    )
+    obj._adjust_roi_for_eager_mode()
+    assert obj.use_roi is False
+
+
+def test_eager_adjust_disables_roi_biplane_all_ffv1():
+    obj = _make_unsparz_for_eager_adjustment(
+        use_roi=True,
+        codec_bp1=["ffv1"], sparse_bp1=None,
+        codec_bp2=["ffv1"], sparse_bp2=None, has_bp2=True,
+    )
+    obj._adjust_roi_for_eager_mode()
+    assert obj.use_roi is False
+
+
+def test_eager_adjust_raises_on_mixed_lossy_ffv1_with_gaps(tmp_path):
+    """Lossy + ffv1 with partial NPZ in eager mode → raise pointing to streaming=True."""
+    npz = tmp_path / "lossy.npz"; npz.write_bytes(b"")
+    obj = _make_unsparz_for_eager_adjustment(
+        use_roi=True,
+        codec_bp1=["x265", "ffv1"],
+        sparse_bp1=[str(npz), None],
+    )
+    try:
+        obj._adjust_roi_for_eager_mode()
+    except ValueError as e:
+        assert "streaming=True" in str(e)
+    else:
+        raise AssertionError("expected ValueError for mixed lossy+ffv1 gaps in eager mode")
+
+
+def test_eager_adjust_no_change_when_all_npz_present(tmp_path):
+    npz1 = tmp_path / "a.npz"; npz1.write_bytes(b"")
+    npz2 = tmp_path / "b.npz"; npz2.write_bytes(b"")
+    obj = _make_unsparz_for_eager_adjustment(
+        use_roi=True,
+        codec_bp1=["x265", "x265"],
+        sparse_bp1=[str(npz1), str(npz2)],
+    )
+    obj._adjust_roi_for_eager_mode()
+    assert obj.use_roi is True
+    assert obj.path_sparse_bp1 == [str(npz1), str(npz2)]
+
+
+# ---------------------------------------------------------------------------
+# load_original_metadata accepts list with None entries
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_metadata(tmp_path, sparse_bp1, has_bp2=False, sparse_bp2=None):
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.path_sparse_bp1 = sparse_bp1
+    obj.path_sparse_bp2 = sparse_bp2
+    obj.path_encoded_bp1 = ["/tmp/a.mkv"]
+    obj.path_encoded_bp2 = ["/tmp/b.mkv"] if has_bp2 else None
+    obj.output_path = str(tmp_path) + "/"
+    obj.stem = "test"
+    return obj
+
+
+def test_load_original_metadata_accepts_list_with_none(tmp_path):
+    """Metadata loader must not call glob.glob on a list (TypeError)."""
+    # Build a real NPZ with embedded metadata so load_metadata_from_npz can read it.
+    import io as _io
+    import zstandard as zstd
+    metadata_dict = {"tags": {"Software": "fixture-software"}, "is_encoded": False}
+    payload = {
+        "encoding": np.array("delta"),
+        "data": np.array([1, 2, 3], dtype=np.int16),
+        "delta_coords": np.array([[0, 1, 2]], dtype=np.int32),
+        "shape": np.array([3, 3, 3], dtype=np.int64),
+        "metadata_json": np.array(json.dumps(metadata_dict)),
+    }
+    buf = _io.BytesIO()
+    np.savez(buf, **payload)
+    cctx = zstd.ZstdCompressor(level=3)
+    compressed = cctx.compress(buf.getvalue())
+    npz_path = tmp_path / "movieA.npz"
+    npz_path.write_bytes(compressed)
+
+    obj = _make_unsparz_for_metadata(tmp_path, sparse_bp1=[str(npz_path), None])
+    paths = obj._collect_npz_paths(obj.path_sparse_bp1)
+    assert paths == [str(npz_path)]
+
+
+def test_collect_npz_paths_handles_glob(tmp_path):
+    a = tmp_path / "a.npz"; a.write_bytes(b"")
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.output_path = str(tmp_path) + "/"
+    paths = obj._collect_npz_paths(str(tmp_path / "*.npz"))
+    assert paths == [str(a)]
+
+
+def test_collect_npz_paths_falls_back_to_output_path(tmp_path):
+    a = tmp_path / "a.npz"; a.write_bytes(b"")
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.output_path = str(tmp_path) + "/"
+    paths = obj._collect_npz_paths(None)
+    assert paths == [str(a)]
+
+
+# ---------------------------------------------------------------------------
+# Streaming TIFF Software metadata
+# ---------------------------------------------------------------------------
+
+def test_streaming_tiff_software_uses_software_kwarg(tmp_path):
+    """Software string must be written via tifffile's software= kwarg, not extratag 305."""
+    obj = _make_unsparz_for_tiff_writer()
+    T, H, W = 2, 2, 2
+    frames = np.zeros((T, H, W), dtype=np.uint16)
+
+    def _chunks():
+        yield 0, T, frames
+
+    file_metadata = {
+        "tags": {
+            "Software": "TestSoftware",  # format_metadata adds " -> UNSPARZ" suffix
+        },
+    }
+
+    out = tmp_path / "sw.tiff"
+    obj._write_streaming_tiff(str(out), _chunks(), T, H, W, np.uint16, file_metadata)
+
+    import tifffile as _tf
+    with _tf.TiffFile(str(out)) as tf:
+        page0 = tf.pages[0]
+        sw_tag = page0.tags.get("Software")
+        assert sw_tag is not None
+        sw_value = sw_tag.value if hasattr(sw_tag, "value") else sw_tag
+        # Must NOT be tifffile.py default; must contain our test string.
+        assert "tifffile" not in sw_value.lower(), \
+            f"Software tag fell through to tifffile default: {sw_value!r}"
+        assert "TestSoftware" in sw_value
+
+
+def test_streaming_tiff_software_warning_path_not_used(tmp_path, monkeypatch):
+    """Confirm extratags passed to tifffile no longer include tag 305."""
+    obj = _make_unsparz_for_tiff_writer()
+    T, H, W = 1, 2, 2
+    frames = np.zeros((T, H, W), dtype=np.uint16)
+
+    def _chunks():
+        yield 0, T, frames
+
+    file_metadata = {"tags": {"Software": "TestSoftware"}}
+
+    import tifffile as _tf
+    real_writer_cls = _tf.TiffWriter
+
+    seen = {"page0_extratags": None, "page0_software": None}
+
+    class _SpyWriter:
+        def __init__(self, *a, **kw):
+            self._inner = real_writer_cls(*a, **kw)
+        def __enter__(self):
+            self._inner.__enter__()
+            return self
+        def __exit__(self, *a):
+            return self._inner.__exit__(*a)
+        def write(self, frame, **kwargs):
+            if seen["page0_extratags"] is None:
+                seen["page0_extratags"] = list(kwargs.get("extratags") or [])
+                seen["page0_software"] = kwargs.get("software")
+            return self._inner.write(frame, **kwargs)
+
+    monkeypatch.setattr(_tf, "TiffWriter", _SpyWriter)
+    out = tmp_path / "sw.tiff"
+    obj._write_streaming_tiff(str(out), _chunks(), T, H, W, np.uint16, file_metadata)
+
+    # tag 305 must NOT appear in extratags.
+    codes = [et[0] for et in seen["page0_extratags"]]
+    assert 305 not in codes
+    # Software was passed via the dedicated kwarg.
+    assert seen["page0_software"] is not None
+    assert "TestSoftware" in seen["page0_software"]
 
 
 class _FallbackMonkeypatch:
