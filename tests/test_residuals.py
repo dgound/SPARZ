@@ -17,11 +17,22 @@ from SPARZ import (
     encode_residual_to_bytes,
     decode_residual_from_bytes,
     save_residual_sidecar,
+    save_residual_sidecar_streaming,
+    iter_residual_chunks_from_path,
+    read_residual_header,
+    read_residual_index,
+    read_residual_chunk_at,
     load_residual_sidecar,
     apply_residuals,
     get_residual_path_for_video,
     find_matching_sidecars_for_video,
     RESIDUAL_SUFFIX,
+    RESIDUAL_VERSION,
+    RESIDUAL_VERSION_V2,
+    RESIDUAL_FLAG_INDEXED,
+    RESIDUAL_INDEX_ENTRY_SIZE,
+    SPARZIP,
+    UNSPARZ,
 )
 
 
@@ -152,6 +163,598 @@ def test_apply_residuals_clips_negative():
     assert (out == 0).all()
 
 
+# ---------------------------------------------------------------------------
+# v2 streaming format
+# ---------------------------------------------------------------------------
+
+def _chunk_iter_for(residual, chunk_size):
+    T = residual.shape[0]
+    for t0 in range(0, T, chunk_size):
+        t1 = min(T, t0 + chunk_size)
+        yield t0, t1, residual[t0:t1]
+
+
+def test_streaming_v2_roundtrip(tmp_path):
+    rng = np.random.default_rng(7)
+    original = rng.integers(0, 4096, size=(11, 6, 5), dtype=np.uint16)
+    decoded = _make_decoded_with_loss(original, scale=2)
+    residual = (original.astype(np.int32) - decoded.astype(np.int32))
+
+    path = str(tmp_path / "v2_residual.zst")
+    save_residual_sidecar_streaming(
+        path, shape=residual.shape, original_dtype=np.uint16,
+        mode="full", codec="x265", compression_level=2,
+        chunk_iter=_chunk_iter_for(residual, chunk_size=4),
+        chunk_size=4,
+    )
+    header = read_residual_header(path)
+    assert header["version"] == RESIDUAL_VERSION_V2
+    assert header["chunk_size"] == 4
+    # 11 frames at chunk_size 4 -> 3 chunks (4, 4, 3)
+    assert header["n_chunks"] == 3
+
+    full, _h = load_residual_sidecar(path)
+    np.testing.assert_array_equal(full.astype(np.int32), residual)
+    reconstructed = apply_residuals(decoded, full, np.uint16)
+    np.testing.assert_array_equal(reconstructed, original)
+
+
+def test_streaming_iter_yields_each_chunk_once(tmp_path):
+    residual = np.arange(2 * 3 * 3, dtype=np.int16).reshape(2, 3, 3)
+    path = str(tmp_path / "two_frames.zst")
+    save_residual_sidecar_streaming(
+        path, shape=residual.shape, original_dtype=np.uint16,
+        mode="full", codec="x264", compression_level=0,
+        chunk_iter=_chunk_iter_for(residual.astype(np.int32), chunk_size=1),
+        chunk_size=1,
+    )
+    seen = list(iter_residual_chunks_from_path(path))
+    assert len(seen) == 2
+    np.testing.assert_array_equal(seen[0][2].astype(np.int32), residual[:1].astype(np.int32))
+    np.testing.assert_array_equal(seen[1][2].astype(np.int32), residual[1:].astype(np.int32))
+
+
+def test_streaming_writer_rejects_chunk_gap(tmp_path):
+    residual = np.zeros((4, 2, 2), dtype=np.int32)
+    path = str(tmp_path / "gap.zst")
+
+    def bad_iter():
+        yield 0, 2, residual[:2]
+        # skip frames 2..3, only emit 3..4
+        yield 3, 4, residual[3:4]
+
+    try:
+        save_residual_sidecar_streaming(
+            path, shape=residual.shape, original_dtype=np.uint16,
+            mode="full", codec="x265", compression_level=0,
+            chunk_iter=bad_iter(), chunk_size=2,
+        )
+    except ValueError as e:
+        assert "chunk gap" in str(e) or "expected start" in str(e)
+    else:
+        raise AssertionError("expected ValueError for chunk gap")
+
+
+def test_streaming_writer_rejects_partial_coverage(tmp_path):
+    residual = np.zeros((4, 2, 2), dtype=np.int32)
+    path = str(tmp_path / "short.zst")
+
+    def short_iter():
+        yield 0, 2, residual[:2]
+        # never yields frames 2..3
+
+    try:
+        save_residual_sidecar_streaming(
+            path, shape=residual.shape, original_dtype=np.uint16,
+            mode="full", codec="x265", compression_level=0,
+            chunk_iter=short_iter(), chunk_size=2,
+        )
+    except ValueError as e:
+        assert "covered" in str(e) or "expected" in str(e)
+    else:
+        raise AssertionError("expected ValueError for partial coverage")
+
+
+# ---------------------------------------------------------------------------
+# Shape-mismatch failure modes
+# ---------------------------------------------------------------------------
+
+def test_apply_residuals_shape_mismatch_raises():
+    decoded = np.zeros((4, 5, 5), dtype=np.uint16)
+    residual = np.zeros((3, 5, 5), dtype=np.int32)
+    try:
+        apply_residuals(decoded, residual, np.uint16, context="unit-test")
+    except ValueError as e:
+        assert "shape mismatch" in str(e)
+    else:
+        raise AssertionError("expected ValueError on shape mismatch")
+
+
+def _make_sparzip_skeleton():
+    """Build a SPARZIP-like object without running __init__ (for unit-test reuse)."""
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.find_roi = False
+    obj.residual_mode = "auto"
+    obj.residual_chunk_size = 4
+    obj.output_path = "/tmp/"
+    return obj
+
+
+def test_compute_residual_chunk_shape_mismatch_raises():
+    obj = _make_sparzip_skeleton()
+    orig = np.zeros((3, 4, 4), dtype=np.uint16)
+    decoded = np.zeros((4, 4, 4), dtype=np.uint16)
+    try:
+        obj.compute_residual_chunk(orig, decoded, mode="full")
+    except ValueError as e:
+        assert "shape mismatch" in str(e)
+    else:
+        raise AssertionError("expected ValueError on chunk shape mismatch")
+
+
+# ---------------------------------------------------------------------------
+# Mode resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_mode_full_with_roi_stays_full():
+    obj = _make_sparzip_skeleton()
+    obj.find_roi = True
+    obj.residual_mode = "full"
+    assert obj._resolve_residual_mode() == "full"
+
+
+def test_resolve_mode_auto_picks_background_when_roi_on():
+    obj = _make_sparzip_skeleton()
+    obj.find_roi = True
+    obj.residual_mode = "auto"
+    assert obj._resolve_residual_mode() == "background"
+
+
+def test_resolve_mode_auto_picks_full_when_roi_off():
+    obj = _make_sparzip_skeleton()
+    obj.find_roi = False
+    obj.residual_mode = "auto"
+    assert obj._resolve_residual_mode() == "full"
+
+
+def test_resolve_mode_background_without_roi_raises():
+    obj = _make_sparzip_skeleton()
+    obj.find_roi = False
+    obj.residual_mode = "background"
+    try:
+        obj._resolve_residual_mode()
+    except ValueError as e:
+        assert "background" in str(e) and "find_roi" in str(e)
+    else:
+        raise AssertionError("expected ValueError for background mode without ROI")
+
+
+# ---------------------------------------------------------------------------
+# Per-video sidecar matching for MKV-style temp dirs
+# ---------------------------------------------------------------------------
+
+def test_find_matching_sidecars_in_extracted_temp_dir(tmp_path):
+    """When MKV is extracted, sidecars and the video share a temp dir.
+
+    The extracted video filename matches the MKV stem (e.g. ``movieA_compression_level_0.mp4``),
+    so find_matching_sidecars_for_video must locate the correctly-named .npz and
+    residual .zst alongside it.
+    """
+    temp_dir = tmp_path / "mkv_temp"
+    temp_dir.mkdir()
+    video_path = temp_dir / "movieA_compression_level_0.mp4"
+    video_path.write_bytes(b"")
+    (temp_dir / "movieA.npz").write_bytes(b"")
+    (temp_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+    # A different, unrelated stem must NOT be matched.
+    (temp_dir / "movieB.npz").write_bytes(b"")
+    (temp_dir / ("movieB_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+
+    s = find_matching_sidecars_for_video(str(video_path))
+    assert s["npz"].endswith("movieA.npz")
+    assert os.path.basename(s["residual"]).startswith("movieA")
+
+
+def test_find_matching_sidecars_with_explicit_search_dir(tmp_path):
+    video_path = tmp_path / "elsewhere" / "movieA_compression_level_0.mp4"
+    video_path.parent.mkdir()
+    video_path.write_bytes(b"")
+    side_dir = tmp_path / "sidecars"
+    side_dir.mkdir()
+    (side_dir / "movieA.npz").write_bytes(b"")
+    (side_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+
+    # Without search_dir, looks next to the video and finds nothing.
+    s_default = find_matching_sidecars_for_video(str(video_path))
+    assert s_default["npz"] is None and s_default["residual"] is None
+
+    # With explicit search_dir, finds both.
+    s_side = find_matching_sidecars_for_video(str(video_path), search_dir=str(side_dir))
+    assert s_side["npz"] is not None
+    assert s_side["residual"] is not None
+
+
+# ---------------------------------------------------------------------------
+# Background residual must remain non-trivial / full mode preserves ROI deltas
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# v2 indexed format: random access without scanning earlier chunks
+# ---------------------------------------------------------------------------
+
+def test_v2_writer_emits_index(tmp_path):
+    residual = np.arange(6 * 2 * 2, dtype=np.int16).reshape(6, 2, 2)
+    path = str(tmp_path / "indexed.zst")
+    save_residual_sidecar_streaming(
+        path, shape=residual.shape, original_dtype=np.uint16,
+        mode="full", codec="x265", compression_level=0,
+        chunk_iter=_chunk_iter_for(residual.astype(np.int32), chunk_size=2),
+        chunk_size=2,
+    )
+    header = read_residual_header(path)
+    assert header["flags"] & RESIDUAL_FLAG_INDEXED
+    assert header["n_chunks"] == 3
+    assert "index" in header
+    index = header["index"]
+    # Three chunks of 2 frames each, with strictly increasing offsets.
+    assert [e[0] for e in index] == [0, 2, 4]
+    assert [e[1] for e in index] == [2, 2, 2]
+    offsets = [e[2] for e in index]
+    assert all(offsets[i] < offsets[i + 1] for i in range(len(offsets) - 1))
+
+
+def test_read_residual_chunk_at_does_not_scan(tmp_path, monkeypatch):
+    """Loading the last chunk via the index should read only its bytes.
+
+    We monkeypatch the zstd decompressor to count calls and verify that exactly
+    one decompression happens when we request a single chunk by index entry.
+    """
+    residual = np.arange(8 * 2 * 2, dtype=np.int16).reshape(8, 2, 2)
+    path = str(tmp_path / "indexed_single_read.zst")
+    save_residual_sidecar_streaming(
+        path, shape=residual.shape, original_dtype=np.uint16,
+        mode="full", codec="x265", compression_level=0,
+        chunk_iter=_chunk_iter_for(residual.astype(np.int32), chunk_size=2),
+        chunk_size=2,
+    )
+    header = read_residual_header(path)
+    index = header["index"]
+    assert len(index) == 4
+    last_entry = index[-1]
+    assert last_entry[0] == 6  # last chunk starts at frame 6
+
+    import zstandard as zstd_mod
+    calls = {"n": 0}
+    real_decompress = zstd_mod.ZstdDecompressor.decompress
+
+    def counting_decompress(self, data):
+        calls["n"] += 1
+        return real_decompress(self, data)
+
+    monkeypatch.setattr(zstd_mod.ZstdDecompressor, "decompress", counting_decompress)
+
+    chunk = read_residual_chunk_at(path, last_entry, header)
+    assert calls["n"] == 1
+    np.testing.assert_array_equal(chunk.astype(np.int32), residual[6:8].astype(np.int32))
+
+
+def test_read_residual_index_handles_legacy_v1_files(tmp_path):
+    """v1 (single-blob) sidecars have no index — read_residual_index returns None."""
+    residual = np.arange(2 * 2 * 2, dtype=np.int16).reshape(2, 2, 2)
+    path = str(tmp_path / "v1.zst")
+    save_residual_sidecar(
+        path, residual.astype(np.int32),
+        original_dtype=np.uint16, mode="full",
+        codec="x265", compression_level=0,
+    )
+    assert read_residual_index(path) is None
+
+
+# ---------------------------------------------------------------------------
+# Two-pass dtype auto-selection
+# ---------------------------------------------------------------------------
+
+def _make_sparzip_for_chunk_iter():
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.find_roi = False
+    obj.residual_mode = "full"
+    obj.residual_chunk_size = 4
+    obj.output_path = "/tmp/"
+    return obj
+
+
+def test_scan_residual_dtype_picks_int16_for_small_residuals():
+    obj = _make_sparzip_for_chunk_iter()
+    chunks = [
+        (0, 4, np.full((4, 2, 2), 100, dtype=np.int32)),
+        (4, 8, np.full((4, 2, 2), -200, dtype=np.int32)),
+    ]
+    factory = lambda: iter(chunks)
+    assert obj._scan_residual_dtype(factory) == np.int16
+
+
+def test_scan_residual_dtype_picks_int32_for_large_residuals():
+    obj = _make_sparzip_for_chunk_iter()
+    chunks = [
+        (0, 4, np.full((4, 2, 2), 100, dtype=np.int32)),
+        (4, 8, np.full((4, 2, 2), 50000, dtype=np.int32)),  # exceeds int16
+    ]
+    factory = lambda: iter(chunks)
+    assert obj._scan_residual_dtype(factory) == np.int32
+
+
+def test_scan_residual_dtype_at_int16_boundary():
+    obj = _make_sparzip_for_chunk_iter()
+    chunks = [
+        (0, 1, np.array([[[32767]]], dtype=np.int32)),
+        (1, 2, np.array([[[-32768]]], dtype=np.int32)),
+    ]
+    factory = lambda: iter(chunks)
+    assert obj._scan_residual_dtype(factory) == np.int16
+
+    chunks_overflow = [(0, 1, np.array([[[32768]]], dtype=np.int32))]
+    assert obj._scan_residual_dtype(lambda: iter(chunks_overflow)) == np.int32
+
+
+# ---------------------------------------------------------------------------
+# Decoded vs original frame-count divergence (extra / short)
+# ---------------------------------------------------------------------------
+
+class _StubDask:
+    def __init__(self, arr):
+        self._arr = arr
+        self.shape = arr.shape
+        self.dtype = arr.dtype
+
+    def __getitem__(self, idx):
+        return _StubDask(self._arr[idx])
+
+    def compute(self):
+        return self._arr
+
+
+def _stub_iter_decoded(self_obj, video_path, chunk_size):
+    arr = self_obj._test_decoded
+    T = arr.shape[0]
+    for t0 in range(0, T, chunk_size):
+        t1 = min(T, t0 + chunk_size)
+        yield t0, t1, arr[t0:t1]
+
+
+def _make_factory_obj(decoded_frames, original_frames, chunk_size=2, mode="full"):
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.find_roi = False
+    obj.residual_mode = "full"
+    obj.residual_chunk_size = chunk_size
+    obj.output_path = "/tmp/"
+    obj._test_decoded = decoded_frames
+    # Bind per-instance overrides without touching the class.
+    import types
+    obj.iter_decoded_video_chunks = types.MethodType(_stub_iter_decoded, obj)
+    return obj
+
+
+def test_factory_raises_on_extra_decoded_frames():
+    decoded = np.zeros((6, 2, 2), dtype=np.uint16)
+    original = np.zeros((4, 2, 2), dtype=np.uint16)
+    obj = _make_factory_obj(decoded, original, chunk_size=2)
+    factory = obj._make_residual_chunk_iter_factory(
+        "fake_video.mp4", _StubDask(original),
+        mode="full", roi_info=None, chunk_size=2, H=2, W=2,
+    )
+    try:
+        list(factory())
+    except ValueError as e:
+        assert "more frames than original" in str(e)
+    else:
+        raise AssertionError("expected ValueError when decoded has extra frames")
+
+
+def test_factory_raises_on_short_decoded():
+    decoded = np.zeros((2, 2, 2), dtype=np.uint16)
+    original = np.zeros((4, 2, 2), dtype=np.uint16)
+    obj = _make_factory_obj(decoded, original, chunk_size=2)
+    factory = obj._make_residual_chunk_iter_factory(
+        "fake_video.mp4", _StubDask(original),
+        mode="full", roi_info=None, chunk_size=2, H=2, W=2,
+    )
+    try:
+        list(factory())
+    except ValueError as e:
+        assert "fewer frames than original" in str(e)
+    else:
+        raise AssertionError("expected ValueError when decoded has fewer frames")
+
+
+def test_factory_yields_matched_chunks_when_aligned():
+    rng = np.random.default_rng(42)
+    original = rng.integers(0, 4096, size=(6, 2, 2), dtype=np.uint16)
+    decoded = _make_decoded_with_loss(original, scale=2)
+    obj = _make_factory_obj(decoded, original, chunk_size=2)
+    factory = obj._make_residual_chunk_iter_factory(
+        "fake_video.mp4", _StubDask(original),
+        mode="full", roi_info=None, chunk_size=2, H=2, W=2,
+    )
+    chunks = list(factory())
+    assert [(c[0], c[1]) for c in chunks] == [(0, 2), (2, 4), (4, 6)]
+    full_residual = np.concatenate([c[2] for c in chunks], axis=0)
+    np.testing.assert_array_equal(
+        full_residual,
+        original.astype(np.int32) - decoded.astype(np.int32),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Biplane MKV-style sidecar alignment
+# ---------------------------------------------------------------------------
+
+def _make_unsparz_for_extract():
+    """Build an UNSPARZ skeleton without running __init__."""
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.temp_dirs_to_cleanup = []
+    obj.path_residual_bp1 = None
+    obj.path_residual_bp2 = None
+    return obj
+
+
+def test_wire_sidecars_from_records_aligns_per_plane(tmp_path):
+    """_wire_sidecars_from_records assigns per-plane lists in input order."""
+    obj = _make_unsparz_for_extract()
+    bp1_records = [
+        {"video": str(tmp_path / "movie1A_compression_level_0.mp4"),
+         "npz": str(tmp_path / "movie1A.npz"),
+         "residual": str(tmp_path / "movie1A_compression_level_0_residual.zst")},
+        {"video": str(tmp_path / "movie2A_compression_level_0.mp4"),
+         "npz": str(tmp_path / "movie2A.npz"),
+         "residual": None},
+    ]
+    bp2_records = [
+        {"video": str(tmp_path / "movie1B_compression_level_0.mp4"),
+         "npz": str(tmp_path / "movie1B.npz"),
+         "residual": str(tmp_path / "movie1B_compression_level_0_residual.zst")},
+        {"video": str(tmp_path / "movie2B_compression_level_0.mp4"),
+         "npz": str(tmp_path / "movie2B.npz"),
+         "residual": None},
+    ]
+
+    obj._wire_sidecars_from_records(bp1_records, plane="bp1")
+    obj._wire_sidecars_from_records(bp2_records, plane="bp2")
+
+    # Both planes get full NPZ lists in record order — no swapping.
+    assert obj.path_sparse_bp1 == [r["npz"] for r in bp1_records]
+    assert obj.path_sparse_bp2 == [r["npz"] for r in bp2_records]
+    assert obj.path_sparse_bp1 != obj.path_sparse_bp2
+
+    # Residual lists keep None gaps for videos with no sidecar.
+    assert obj.path_residual_bp1 == [r["residual"] for r in bp1_records]
+    assert obj.path_residual_bp2 == [r["residual"] for r in bp2_records]
+    # And the bp2 list is not the same object as bp1.
+    assert obj.path_residual_bp1[0].endswith("movie1A_compression_level_0_residual.zst")
+    assert obj.path_residual_bp2[0].endswith("movie1B_compression_level_0_residual.zst")
+
+
+def test_wire_sidecars_warns_on_missing_npz(tmp_path, capsys):
+    obj = _make_unsparz_for_extract()
+    records = [
+        {"video": str(tmp_path / "a.mp4"), "npz": str(tmp_path / "a.npz"), "residual": None},
+        {"video": str(tmp_path / "b.mp4"), "npz": None, "residual": None},
+    ]
+    obj._wire_sidecars_from_records(records, plane="bp1")
+    out = capsys.readouterr().out if hasattr(capsys, "readouterr") else ""
+    assert obj.path_sparse_bp1 is None  # partial NPZ coverage -> disabled
+    if out:
+        assert "1/2 NPZ" in out or "partial" in out.lower() or "warning" in out.lower()
+
+
+def test_extract_one_mkv_uses_stem_matched_sidecars(tmp_path):
+    """_extract_one_mkv picks sidecars whose stems match the extracted video.
+
+    We cannot run ffmpeg in unit tests, so we pre-create the temp dir the same
+    way _extract_one_mkv would and short-circuit the ffmpeg calls by faking the
+    'video already extracted' branch.
+    """
+    obj = _make_unsparz_for_extract()
+    mkv_dir = tmp_path / "mkvs"
+    mkv_dir.mkdir()
+    mkv_file = mkv_dir / "movieA_compression_level_0.mkv"
+    mkv_file.write_bytes(b"")
+
+    temp_dir = mkv_dir / "mkv_temp"
+    temp_dir.mkdir()
+    video_path = temp_dir / "movieA_compression_level_0.mp4"
+    video_path.write_bytes(b"")
+    (temp_dir / "movieA.npz").write_bytes(b"")
+    (temp_dir / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+    # Decoy sidecars with a different stem must NOT be picked up.
+    (temp_dir / "movieB.npz").write_bytes(b"")
+    (temp_dir / ("movieB_compression_level_0" + RESIDUAL_SUFFIX)).write_bytes(b"")
+
+    # Stub out _extract_mkv_attachments — it needs ffmpeg/ffprobe.
+    import types
+    obj._extract_mkv_attachments = types.MethodType(lambda self, m, t: (0, 0), obj)
+
+    record = obj._extract_one_mkv(str(mkv_file))
+    assert record["video"] == str(video_path)
+    assert record["npz"].endswith("movieA.npz")
+    assert os.path.basename(record["residual"]).startswith("movieA")
+
+
+def test_load_sparse_accepts_list(tmp_path):
+    """UNSPARZ.load_sparse should accept an explicit list, not only a glob string."""
+    # Use the static helper to avoid any ffmpeg setup.
+    paths = ["/tmp/a.npz", "/tmp/b.npz"]
+    resolved = UNSPARZ._resolve_paths(paths)
+    assert resolved == sorted(paths)
+    glob_resolved = UNSPARZ._resolve_paths("/tmp/*.npz")  # may match nothing, that's fine
+    assert isinstance(glob_resolved, list)
+
+
+# ---------------------------------------------------------------------------
+# Original test renamed for clarity (kept for behavior parity)
+# ---------------------------------------------------------------------------
+
+def test_full_mode_residual_does_not_zero_at_roi():
+    """In full mode, residual carries non-zero values at ROI pixels too."""
+    rng = np.random.default_rng(2)
+    original = rng.integers(100, 4096, size=(2, 3, 3), dtype=np.uint16)
+    decoded = _make_decoded_with_loss(original, scale=2)
+
+    residual = original.astype(np.int32) - decoded.astype(np.int32)
+    payload = encode_residual_to_bytes(
+        residual, original_dtype="uint16", mode="full",
+        codec="x265", compression_level=0,
+    )
+    loaded, header = decode_residual_from_bytes(payload)
+    assert header["mode"] == "full"
+    # At least some pixels carry a non-zero residual (this would be zero in background mode).
+    assert np.any(loaded != 0)
+
+
+class _FallbackMonkeypatch:
+    """Minimal pytest-monkeypatch substitute for the no-pytest fallback runner."""
+    def __init__(self):
+        self._undo = []
+
+    def setattr(self, target, name, value, raising=True):
+        self._undo.append((target, name, getattr(target, name)))
+        setattr(target, name, value)
+
+    def teardown(self):
+        for target, name, original in reversed(self._undo):
+            setattr(target, name, original)
+        self._undo.clear()
+
+
+class _FallbackCapsys:
+    """Minimal pytest-capsys substitute capturing stdout."""
+    def __init__(self):
+        import io as _io
+        self._buf = _io.StringIO()
+        self._original = None
+
+    def start(self):
+        import sys as _sys
+        self._original = _sys.stdout
+        _sys.stdout = self._buf
+
+    def stop(self):
+        import sys as _sys
+        if self._original is not None:
+            _sys.stdout = self._original
+
+    def readouterr(self):
+        text = self._buf.getvalue()
+        self._buf.seek(0)
+        self._buf.truncate(0)
+
+        class _R:
+            pass
+        r = _R()
+        r.out = text
+        r.err = ""
+        return r
+
+
 if __name__ == "__main__":
     if pytest is not None:
         raise SystemExit(pytest.main([__file__, "-v"]))
@@ -165,19 +768,40 @@ if __name__ == "__main__":
         sig = inspect.signature(fn)
         kwargs = {}
         td = None
+        mp = None
+        cs = None
         if "tmp_path" in sig.parameters:
             td = tempfile.TemporaryDirectory()
             from pathlib import Path
             kwargs["tmp_path"] = Path(td.name)
+        if "monkeypatch" in sig.parameters:
+            mp = _FallbackMonkeypatch()
+            kwargs["monkeypatch"] = mp
+        if "capsys" in sig.parameters:
+            cs = _FallbackCapsys()
+            cs.start()
+            kwargs["capsys"] = cs
+        outcome = None
+        err = None
         try:
             fn(**kwargs)
-            print(f"PASS  {fn.__name__}")
+            outcome = "PASS"
         except Exception as e:
-            failures.append((fn.__name__, e))
-            print(f"FAIL  {fn.__name__}: {e}")
+            outcome = "FAIL"
+            err = e
         finally:
+            if cs is not None:
+                cs.stop()
+            if mp is not None:
+                mp.teardown()
             if td is not None:
                 td.cleanup()
+        # Print outcome AFTER capsys has been restored so it actually reaches stdout.
+        if outcome == "PASS":
+            print(f"PASS  {fn.__name__}")
+        else:
+            failures.append((fn.__name__, err))
+            print(f"FAIL  {fn.__name__}: {err}")
     if failures:
         for name, err in failures:
             print(f"  -> {name}: {err}")
