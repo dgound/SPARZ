@@ -778,6 +778,30 @@ def find_matching_sidecars_for_video(video_path, search_dir=None):
     }
 
 
+def find_metadata_sidecars_for_video(video_path, search_dir=None):
+    """Return metadata JSON sidecars matching ``video_path`` by original stem.
+
+    FFV1 single-file archives may have no ROI NPZ to carry embedded metadata,
+    so SPARZIP attaches a per-video JSON sidecar named
+    ``<input_stem>_metadata_bp{1,2}.json``. Prefer that exact stem match; fall
+    back to a single metadata JSON in the directory for backward compatibility
+    with dataset-level ``<stem>_metadata_bp{1,2}.json`` files.
+    """
+    video_dir = search_dir if search_dir is not None else os.path.dirname(video_path) or "."
+    video_base = os.path.splitext(os.path.basename(video_path))[0]
+    input_stem = re.sub(r"_compression_level_-?\d+$", "", video_base)
+
+    out = {}
+    for plane in ("bp1", "bp2"):
+        exact = os.path.join(video_dir, f"{input_stem}_metadata_{plane}.json")
+        if os.path.exists(exact):
+            out[plane] = exact
+            continue
+        matches = sorted(glob.glob(os.path.join(video_dir, f"*_metadata_{plane}.json")))
+        out[plane] = matches[0] if len(matches) == 1 else None
+    return out
+
+
 class _LazyVideoProbe:
     """Shape/dtype probe for an encoded video without decoding any frames.
 
@@ -2766,20 +2790,30 @@ class SPARZIP:
             # This is now the default behavior, metadata is embedded in NPZ
             return
 
+        self._write_metadata_json_files()
+
+    def _write_metadata_json_files(self):
+        """Write dataset-level metadata JSON files and return paths by plane."""
+        if not self.extract_metadata_flag:
+            return {}
+
         print('Saving metadata to separate JSON files...')
-        
+
+        written = {}
+
         # Serialize metadata
         serialized_bp1 = serialize_metadata(self.metadata_bp1)
-        
+
         # Save BP1 metadata
         metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
         try:
             with open(metadata_file_bp1, 'w') as f:
                 json.dump(serialized_bp1, f, indent=4)
             print(f'Saved BP1 metadata to: {metadata_file_bp1}')
+            written['bp1'] = metadata_file_bp1
         except Exception as e:
             print(f'Error saving BP1 metadata to {metadata_file_bp1}: {e}')
-            
+
         # Save BP2 metadata if it exists
         if self.metadata_bp2:
             serialized_bp2 = serialize_metadata(self.metadata_bp2)
@@ -2788,8 +2822,29 @@ class SPARZIP:
                 with open(metadata_file_bp2, 'w') as f:
                     json.dump(serialized_bp2, f, indent=4)
                 print(f'Saved BP2 metadata to: {metadata_file_bp2}')
+                written['bp2'] = metadata_file_bp2
             except Exception as e:
                 print(f'Error saving BP2 metadata to {metadata_file_bp2}: {e}')
+        return written
+
+    def _write_mkv_metadata_sidecar(self, input_stem, plane, index):
+        """Write a per-video metadata JSON sidecar for MKV attachment."""
+        if not self.extract_metadata_flag:
+            return None
+        metadata_list = self.metadata_bp1 if plane == 'bp1' else self.metadata_bp2
+        if not metadata_list or index >= len(metadata_list):
+            return None
+        metadata_entry = metadata_list[index]
+        if not metadata_entry:
+            return None
+        out_path = os.path.join(self.output_path, f'{input_stem}_metadata_{plane}.json')
+        try:
+            with open(out_path, 'w') as f:
+                json.dump(serialize_metadata([metadata_entry]), f, indent=4)
+            return out_path
+        except Exception as e:
+            print(f'Error saving {plane} metadata sidecar to {out_path}: {e}')
+            return None
 
     def _print_compression_stats(self):
         """Print breakdown of compressed file sizes."""
@@ -2899,8 +2954,7 @@ class SPARZIP:
             video_ext = 'mp4'  # Default for x265, av1, x264, etc.
         
         # Find all generated video files (following the actual naming pattern)
-        video_files = []
-        mkv_files_to_create = []
+        video_entries = []
         
         for k in range(len(self.processed_bp1)):
             input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
@@ -2911,8 +2965,13 @@ class SPARZIP:
                 # Validate video file before adding to list
                 try:
                     self.validate_video_file(video_name1)
-                    video_files.append(video_name1)
-                    mkv_files_to_create.append(mkv_name1)
+                    video_entries.append({
+                        'video': video_name1,
+                        'mkv': mkv_name1,
+                        'plane': 'bp1',
+                        'index': k,
+                        'input_stem': input_file_name1,
+                    })
                 except Exception as e:
                     print(f"Warning: Skipping invalid video file {video_name1}: {e}")
                     continue
@@ -2927,13 +2986,18 @@ class SPARZIP:
                     # Validate video file before adding to list
                     try:
                         self.validate_video_file(video_name2)
-                        video_files.append(video_name2)
-                        mkv_files_to_create.append(mkv_name2)
+                        video_entries.append({
+                            'video': video_name2,
+                            'mkv': mkv_name2,
+                            'plane': 'bp2',
+                            'index': k,
+                            'input_stem': input_file_name2,
+                        })
                     except Exception as e:
                         print(f"Warning: Skipping invalid video file {video_name2}: {e}")
                         continue
         
-        if not video_files:
+        if not video_entries:
             print('Warning: No video files found. Skipping MKV packaging.')
             return
         
@@ -2942,13 +3006,21 @@ class SPARZIP:
         successful_count = 0
         failed_count = 0
 
-        for video_file, mkv_file in zip(video_files, mkv_files_to_create):
+        for entry in video_entries:
+            video_file = entry['video']
+            mkv_file = entry['mkv']
             try:
                 print(f'  Creating MKV: {os.path.basename(mkv_file)}...')
 
                 # Per-video sidecar selection: only attach files matching this stem
                 sidecars = self.find_matching_sidecars_for_video(video_file)
                 attachments = [p for p in (sidecars.get('npz'), sidecars.get('residual')) if p]
+                if self.extract_metadata_flag and (codec == 'ffv1' or self.save_metadata_to_json):
+                    metadata_path = self._write_mkv_metadata_sidecar(
+                        entry['input_stem'], entry['plane'], entry['index']
+                    )
+                    if metadata_path:
+                        attachments.append(metadata_path)
 
                 cmd = [
                     'ffmpeg', '-y',
@@ -3054,6 +3126,8 @@ class UNSPARZ:
         self._mkv_extracted = False
         self._codec_bp1 = None
         self._codec_bp2 = None
+        self.path_metadata_bp1 = None
+        self.path_metadata_bp2 = None
         if self._looks_like_mkv_input(path_encoded_bp1):
             mkv_files = self._resolve_mkv_files(path_encoded_bp1)
             if not mkv_files:
@@ -3177,7 +3251,9 @@ class UNSPARZ:
                                                              f'attachment_{attachment_count}.bin')
             attachment_path = os.path.join(temp_dir, attachment_filename)
             kind = ('residual' if attachment_filename.endswith(RESIDUAL_SUFFIX)
-                    else ('npz' if attachment_filename.endswith('.npz') else 'attachment'))
+                    else ('npz' if attachment_filename.endswith('.npz')
+                          else ('metadata' if re.search(r'_metadata_bp[12]\.json$', attachment_filename)
+                                else 'attachment')))
 
             if os.path.exists(attachment_path):
                 print(f'{kind} already extracted: {attachment_filename}')
@@ -3276,12 +3352,18 @@ class UNSPARZ:
 
         # Match sidecars by stem in the temp dir first, then the MKV dir.
         sidecars = find_matching_sidecars_for_video(video_path, search_dir=temp_dir)
+        metadata_sidecars = find_metadata_sidecars_for_video(video_path, search_dir=temp_dir)
         if not sidecars["npz"] and mkv_dir:
             fallback = find_matching_sidecars_for_video(video_path, search_dir=mkv_dir)
             if fallback["npz"]:
                 sidecars["npz"] = fallback["npz"]
             if fallback["residual"] and not sidecars["residual"]:
                 sidecars["residual"] = fallback["residual"]
+        if mkv_dir:
+            fallback_meta = find_metadata_sidecars_for_video(video_path, search_dir=mkv_dir)
+            for plane in ("bp1", "bp2"):
+                if not metadata_sidecars.get(plane) and fallback_meta.get(plane):
+                    metadata_sidecars[plane] = fallback_meta[plane]
 
         return {
             "video": video_path,
@@ -3290,6 +3372,8 @@ class UNSPARZ:
             "temp_dir": temp_dir,
             "mkv_dir": mkv_dir,
             "codec": codec_name,
+            "metadata_bp1": metadata_sidecars.get("bp1"),
+            "metadata_bp2": metadata_sidecars.get("bp2"),
         }
 
     def _extract_mkv_group(self, mkv_files):
@@ -3311,11 +3395,14 @@ class UNSPARZ:
         """
         npz_paths = [r["npz"] for r in records]
         res_paths = [r["residual"] for r in records]
+        metadata_key = f"metadata_{plane}"
+        metadata_paths = [r.get(metadata_key) for r in records]
         codec_list = [r.get("codec") for r in records]
         n_npz = sum(1 for p in npz_paths if p)
         n_res = sum(1 for p in res_paths if p)
+        n_meta = sum(1 for p in metadata_paths if p)
         print(f'  {plane}: matched {n_npz} NPZ and {n_res} residual sidecar(s) '
-              f'to {len(records)} video(s)')
+              f'to {len(records)} video(s); metadata JSON: {n_meta}')
 
         setattr(self, f'_codec_{plane}', codec_list)
 
@@ -3332,6 +3419,8 @@ class UNSPARZ:
         # apply step which already tolerates them.
         if n_res > 0 and getattr(self, f'path_residual_{plane}') is None:
             setattr(self, f'path_residual_{plane}', res_paths)
+        if n_meta > 0:
+            setattr(self, f'path_metadata_{plane}', metadata_paths)
 
     @staticmethod
     def _looks_like_mkv_input(path_or_glob):
@@ -3580,8 +3669,15 @@ class UNSPARZ:
         Compatible with both original (45e86e9) and current formats.
         """
         try:
-            # Load the NPZ file
-            npz_data = np.load(npz_file_path, allow_pickle=True)
+            with open(npz_file_path, 'rb') as f:
+                file_bytes = f.read()
+
+            if file_bytes[:4] == b'\x28\xb5\x2f\xfd':
+                dctx = zstd.ZstdDecompressor()
+                decompressed = dctx.decompress(file_bytes)
+                npz_data = np.load(io.BytesIO(decompressed), allow_pickle=True)
+            else:
+                npz_data = np.load(npz_file_path, allow_pickle=True)
             
             # Check for metadata in different formats
             if 'metadata' in npz_data:
@@ -3600,6 +3696,32 @@ class UNSPARZ:
         except Exception as e:
             print(f'Error loading metadata from {npz_file_path}: {e}')
             return {}
+
+    def _load_metadata_json_collection(self, maybe_paths, label):
+        """Load one or more JSON metadata files into a metadata list."""
+        if not maybe_paths:
+            return None
+        if isinstance(maybe_paths, (list, tuple)):
+            files = [p for p in maybe_paths if p and os.path.exists(p)]
+        else:
+            files = sorted(glob.glob(maybe_paths)) if any(ch in str(maybe_paths) for ch in "*?[") else [maybe_paths]
+            files = [p for p in files if p and os.path.exists(p)]
+        if not files:
+            return None
+
+        metadata = []
+        for path in files:
+            try:
+                with open(path, 'r') as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, list):
+                    metadata.extend(loaded)
+                elif isinstance(loaded, dict):
+                    metadata.append(loaded)
+                print(f'Loaded metadata for {label} from: {path}')
+            except Exception as e:
+                print(f'Error loading metadata from JSON file {path}: {e}')
+        return metadata if metadata else None
 
     def load_original_metadata(self):
         """
@@ -3643,6 +3765,15 @@ class UNSPARZ:
 
         metadata_bp1 = None
         metadata_bp2 = None
+
+        attached_metadata_bp1 = self._load_metadata_json_collection(
+            getattr(self, 'path_metadata_bp1', None), 'BP1'
+        )
+        if attached_metadata_bp1:
+            attached_metadata_bp2 = self._load_metadata_json_collection(
+                getattr(self, 'path_metadata_bp2', None), 'BP2'
+            )
+            return attached_metadata_bp1, attached_metadata_bp2
 
         if os.path.exists(metadata_file_bp1):
             try:

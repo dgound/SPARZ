@@ -1387,7 +1387,7 @@ def _make_unsparz_for_metadata(tmp_path, sparse_bp1, has_bp2=False, sparse_bp2=N
 
 
 def test_load_original_metadata_accepts_list_with_none(tmp_path):
-    """Metadata loader must not call glob.glob on a list (TypeError)."""
+    """Metadata loader must read zstd-compressed NPZ metadata from list inputs."""
     # Build a real NPZ with embedded metadata so load_metadata_from_npz can read it.
     import io as _io
     import zstandard as zstd
@@ -1409,6 +1409,49 @@ def test_load_original_metadata_accepts_list_with_none(tmp_path):
     obj = _make_unsparz_for_metadata(tmp_path, sparse_bp1=[str(npz_path), None])
     paths = obj._collect_npz_paths(obj.path_sparse_bp1)
     assert paths == [str(npz_path)]
+    loaded = obj.load_metadata_from_npz(str(npz_path))
+    assert loaded["tags"]["Software"] == "fixture-software"
+
+    metadata_bp1, metadata_bp2 = obj.load_original_metadata()
+    assert metadata_bp2 is None
+    assert metadata_bp1[0]["tags"]["Software"] == "fixture-software"
+
+
+def test_load_original_metadata_prefers_attached_json_sidecar(tmp_path):
+    """FFV1 MKVs can carry metadata JSON even when there is no ROI NPZ."""
+    metadata_path = tmp_path / "movieA_metadata_bp1.json"
+    metadata_path.write_text(json.dumps([{
+        "tags": {"Software": "ffv1-sidecar"},
+        "is_encoded": False,
+    }]))
+
+    obj = _make_unsparz_for_metadata(tmp_path, sparse_bp1=None)
+    obj.path_metadata_bp1 = [str(metadata_path)]
+    obj.path_metadata_bp2 = None
+
+    metadata_bp1, metadata_bp2 = obj.load_original_metadata()
+    assert metadata_bp2 is None
+    assert metadata_bp1[0]["tags"]["Software"] == "ffv1-sidecar"
+
+
+def test_write_mkv_metadata_sidecar_matches_video_stem(tmp_path):
+    """Per-video JSON sidecars are named so MKV extraction can match them by stem."""
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.extract_metadata_flag = True
+    obj.output_path = str(tmp_path) + "/"
+    obj.metadata_bp1 = [{"tags": {"Software": "bp1-meta"}}]
+    obj.metadata_bp2 = None
+
+    path = obj._write_mkv_metadata_sidecar("movieA", "bp1", 0)
+    assert path.endswith("movieA_metadata_bp1.json")
+    assert os.path.exists(path)
+
+    matched = sparz_mod.find_metadata_sidecars_for_video(
+        str(tmp_path / "movieA_compression_level_0.mkv"),
+        search_dir=str(tmp_path),
+    )
+    assert matched["bp1"] == path
+    assert matched["bp2"] is None
 
 
 def test_collect_npz_paths_handles_glob(tmp_path):
