@@ -4,6 +4,7 @@ import os
 import sys
 
 import numpy as np
+import dask.array as da
 
 try:
     import pytest
@@ -292,6 +293,72 @@ def test_compute_residual_chunk_shape_mismatch_raises():
         assert "shape mismatch" in str(e)
     else:
         raise AssertionError("expected ValueError on chunk shape mismatch")
+
+
+def _make_sparzip_for_process_images(bp1_arrays, bp2_arrays=None, peak_process=None):
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.single_plane = bp2_arrays is None
+    obj.kernel_size = 3
+    obj.rel_threshold = 0.5
+    obj.peak_process = peak_process
+    obj.bp1 = [da.from_array(a, chunks=(1, a.shape[1], a.shape[2])) for a in bp1_arrays]
+    obj.bp2 = (
+        [da.from_array(a, chunks=(1, a.shape[1], a.shape[2])) for a in bp2_arrays]
+        if bp2_arrays is not None else None
+    )
+    return obj
+
+
+def test_process_images_single_plane_uses_each_stack_shape():
+    first = np.zeros((1, 5, 5), dtype=np.uint16)
+    first[0, 2, 2] = 100
+    second = np.zeros((1, 6, 6), dtype=np.uint16)
+    second[0, 3, 3] = 100
+
+    obj = _make_sparzip_for_process_images([first, second])
+    processed, processed_bp2 = obj.process_images()
+
+    assert processed_bp2 is None
+    assert processed[0].compute().shape == first.shape
+    second_dense = processed[1].compute().todense()
+    assert second_dense.shape == second.shape
+    assert second_dense[0, 3, 3] == 100
+
+
+def test_process_images_biplane_uses_each_stack_shape():
+    bp1_first = np.zeros((1, 5, 5), dtype=np.uint16)
+    bp1_first[0, 2, 2] = 100
+    bp2_first = np.zeros((1, 5, 5), dtype=np.uint16)
+    bp2_first[0, 1, 1] = 100
+    bp1_second = np.zeros((1, 6, 6), dtype=np.uint16)
+    bp1_second[0, 3, 3] = 100
+    bp2_second = np.zeros((1, 6, 6), dtype=np.uint16)
+    bp2_second[0, 4, 4] = 100
+
+    obj = _make_sparzip_for_process_images(
+        [bp1_first, bp1_second],
+        [bp2_first, bp2_second],
+    )
+    processed_bp1, processed_bp2 = obj.process_images()
+
+    assert processed_bp1[0].compute().shape == bp1_first.shape
+    assert processed_bp2[0].compute().shape == bp2_first.shape
+    bp1_second_dense = processed_bp1[1].compute().todense()
+    bp2_second_dense = processed_bp2[1].compute().todense()
+    assert bp1_second_dense.shape == bp1_second.shape
+    assert bp2_second_dense.shape == bp2_second.shape
+    assert bp1_second_dense[0, 3, 3] == 100
+    assert bp2_second_dense[0, 4, 4] == 100
+
+
+def test_process_images_median_patch_runs_before_sparse_graph():
+    frame = np.zeros((1, 5, 5), dtype=np.uint16)
+    frame[0, 2, 2] = 100
+
+    obj = _make_sparzip_for_process_images([frame], peak_process="median")
+    processed, _ = obj.process_images()
+
+    assert processed[0].compute().todense().sum() == 0
 
 
 # ---------------------------------------------------------------------------

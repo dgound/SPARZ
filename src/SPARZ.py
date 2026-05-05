@@ -1355,6 +1355,13 @@ class SPARZIP:
 
     def process_images(self):
         print('Processing images...')
+
+        if self.peak_process == 'median':
+            print('Applying median patch...')
+            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
+            if not self.single_plane:
+                self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
+
         # Step 1: Find peaks in plane 1
         map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
 
@@ -1363,7 +1370,7 @@ class SPARZIP:
             # Step 2: Find peaks in plane 2
             map2 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp2]
             # Step 3: Union of peaks from both planes
-            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[0][0,:,:].shape, dtype='int16') for i in range(len(map1))]
+            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[i][0,:,:].shape, dtype='int16') for i in range(len(map1))]
             # Step 4: Expand peaks with kernel
             map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
             # Step 5: Apply mask to extract ROI values
@@ -1376,29 +1383,23 @@ class SPARZIP:
                 sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
                 sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
 
-            if self.peak_process == 'median':
-                print('Applying median patch...')
-                new_bp1 = []
-                for block in self.bp1:
-                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp1 = new_bp1
-
-                new_bp2 = []
-                for block in self.bp2:
-                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-                self.bp2 = new_bp2
-
             print('Done.')
             # Step 6: Convert to sparse at the end
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
 
         # Single plane processing
         print('Single plane')
-        def add_mask(peaks):
-            tmp = np.zeros(self.bp1[0][0,:,:].shape)
+        def add_mask(peaks, frame_shape):
+            tmp = np.zeros(frame_shape, dtype='int16')
             tmp[peaks[:, 0], peaks[:, 1]] = 1
             return tmp
-        map_mask = [b.map_blocks(lambda x: add_mask(x), dtype='int16') for b in map1]
+        map_mask = [
+            b.map_blocks(
+                lambda x, frame_shape=self.bp1[i][0,:,:].shape: add_mask(x, frame_shape),
+                dtype='int16',
+            )
+            for i, b in enumerate(map1)
+        ]
         map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
         try:
             sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
@@ -1406,13 +1407,6 @@ class SPARZIP:
             def apply_where(kernel, img):
                 return da.where(kernel, img, 0)
             sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
-
-        if self.peak_process == 'median':
-            print('Applying median patch...')
-            new_bp1 = []
-            for block in self.bp1:
-                new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-            self.bp1 = new_bp1
 
         print('Done.')
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
