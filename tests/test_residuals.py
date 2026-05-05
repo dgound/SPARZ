@@ -1043,6 +1043,91 @@ def test_container_for_mkv_video_codec_picks_correct_extension():
     assert _container_for_mkv_video_codec("HEVC") == ("mp4", "mp4")
 
 
+def test_x264_decode_paths_use_same_uint16_luma(tmp_path):
+    """Residual generation, streaming UNSPARZ, and eager UNSPARZ must agree."""
+    import shutil
+    import subprocess
+
+    if shutil.which("ffmpeg") is None:
+        return
+
+    T, H, W = 2, 8, 8
+    original = (np.arange(T * H * W, dtype=np.uint16).reshape(T, H, W) * 400).astype(np.uint16)
+    video_path = tmp_path / "x264_gray10.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo",
+        "-pix_fmt", "gray16le",
+        "-s", f"{W}x{H}",
+        "-r", "25",
+        "-i", "pipe:0",
+        "-vcodec", "libx264",
+        "-pix_fmt", "gray10le",
+        "-crf", "0",
+        "-loglevel", "error",
+        str(video_path),
+    ]
+    result = subprocess.run(cmd, input=original.tobytes(), capture_output=True)
+    if result.returncode != 0:
+        return
+
+    sparzip = SPARZIP.__new__(SPARZIP)
+    residual_chunks = [
+        chunk for _start, _end, chunk in sparzip.iter_decoded_video_chunks(str(video_path), chunk_size=1)
+    ]
+    residual_decode = np.concatenate(residual_chunks, axis=0)
+
+    unsparz = UNSPARZ.__new__(UNSPARZ)
+    streaming_chunks = [
+        chunk for _start, _end, chunk in unsparz._iter_video_chunks_streaming(str(video_path), chunk_size=1)
+    ]
+    streaming_decode = np.concatenate(streaming_chunks, axis=0)
+
+    eager_decode = unsparz.load_mp4(str(video_path)).compute()
+
+    np.testing.assert_array_equal(streaming_decode, residual_decode)
+    np.testing.assert_array_equal(eager_decode, residual_decode)
+
+
+def test_package_to_mkv_removes_generated_sources_after_success(tmp_path, monkeypatch):
+    import subprocess
+
+    video_path = tmp_path / "movieA_compression_level_0.mp4"
+    npz_path = tmp_path / "movieA.npz"
+    residual_path = tmp_path / ("movieA_compression_level_0" + RESIDUAL_SUFFIX)
+    mkv_path = tmp_path / "movieA_compression_level_0.mkv"
+    video_path.write_bytes(b"video-bytes")
+    npz_path.write_bytes(b"npz-bytes")
+    residual_path.write_bytes(b"residual-bytes")
+
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.output_path = str(tmp_path) + os.sep
+    obj.path_image_files1 = [str(tmp_path / "movieA.tiff")]
+    obj.processed_bp1 = [object()]
+    obj.single_plane = True
+    obj.extract_metadata_flag = False
+    obj.save_metadata_to_json = False
+    obj.validate_video_file = lambda _path: None
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(cmd, capture_output=True, text=True, timeout=None):
+        assert cmd[-1] == str(mkv_path)
+        mkv_path.write_bytes(b"mkv-with-attachments")
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    obj.package_to_mkv("x265", 0)
+
+    assert mkv_path.exists()
+    assert not video_path.exists()
+    assert not npz_path.exists()
+    assert not residual_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # MKV sidecar validation
 # ---------------------------------------------------------------------------

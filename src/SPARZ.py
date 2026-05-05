@@ -737,6 +737,31 @@ def get_residual_path_for_video(video_path):
     return base + RESIDUAL_SUFFIX
 
 
+def _decode_pyav_frame_to_uint16(frame):
+    """Decode a PyAV video frame into the canonical SPARZ uint16 grayscale plane."""
+    fmt = (getattr(frame.format, "name", "") or "").lower()
+    if "yuv" in fmt:
+        y_plane = frame.planes[0]
+        match = re.search(r"p(\d+)", fmt)
+        bit_depth = int(match.group(1)) if match else 8
+        if bit_depth > 8:
+            y_data = np.frombuffer(y_plane, dtype=np.uint16).reshape(
+                frame.height, y_plane.line_size // 2
+            )
+            y_data = y_data[:, :frame.width]
+            if bit_depth < 16:
+                return (y_data.astype(np.uint16, copy=False) << (16 - bit_depth))
+            return y_data.astype(np.uint16, copy=False)
+
+        y_data = np.frombuffer(y_plane, dtype=np.uint8).reshape(
+            frame.height, y_plane.line_size
+        )
+        y_data = y_data[:, :frame.width]
+        return (y_data.astype(np.uint16) << 8)
+
+    return frame.to_ndarray(format="gray16le").astype(np.uint16, copy=False)
+
+
 def _container_for_mkv_video_codec(codec_name):
     """Pick ``(file_ext, ffmpeg_format_name)`` for re-muxing an MKV's video stream.
 
@@ -2521,7 +2546,7 @@ class SPARZIP:
             buf = []
             start = 0
             for frame in container.decode(video_stream):
-                buf.append(frame.to_ndarray(format="gray16le"))
+                buf.append(_decode_pyav_frame_to_uint16(frame))
                 if len(buf) == chunk_size:
                     arr = np.stack(buf, axis=0).astype(np.uint16, copy=False)
                     end = start + arr.shape[0]
@@ -3121,6 +3146,19 @@ class SPARZIP:
                 print(f'  SUCCESS: Created {os.path.basename(mkv_file)} ({mkv_size / (1024*1024):.1f} MB)')
                 print(f'    - Video: {os.path.basename(video_file)}')
                 print(f'    - Attachments: {attach_names}')
+
+                # create_single_file means the MKV is the durable artifact.
+                # Remove generated source files only after the container exists.
+                cleanup_errors = []
+                for source_path in [video_file] + attachments:
+                    if not source_path or not os.path.exists(source_path):
+                        continue
+                    try:
+                        os.remove(source_path)
+                    except Exception as e:
+                        cleanup_errors.append(f'{os.path.basename(source_path)}: {e}')
+                if cleanup_errors:
+                    print(f'  WARNING: Could not remove source files: {cleanup_errors}')
                 
             except subprocess.TimeoutExpired:
                 print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
@@ -4514,7 +4552,7 @@ class UNSPARZ:
             frames = []
             dtype = None
             for frame in container.decode(video_stream):
-                np_frame = frame.to_ndarray(format='gray16le')
+                np_frame = _decode_pyav_frame_to_uint16(frame)
                 if dtype is None:
                     dtype = np_frame.dtype  # Set dtype on first frame
                 frames.append(np_frame)
@@ -4529,28 +4567,7 @@ class UNSPARZ:
                 if i == 0:
                     print(f'  H264 frame format: {frame.format.name}, size: {frame.width}x{frame.height}')
 
-                # h264 is typically encoded as YUV even if input was grayscale
-                # Extract Y (luma) plane and scale to 16-bit
-                if 'yuv' in frame.format.name:
-                    # Get Y plane (luma) - this contains the grayscale data
-                    y_plane = frame.planes[0]
-                    # Determine bit depth from format name
-                    if '10' in frame.format.name:
-                        # 10-bit YUV: Y plane is uint16 with 10 bits of data
-                        y_data = np.frombuffer(y_plane, dtype=np.uint16).reshape(frame.height, y_plane.line_size // 2)
-                        # Crop to actual width (line_size may include padding)
-                        y_data = y_data[:, :frame.width]
-                        # Scale 10-bit to 16-bit (left shift by 6)
-                        np_frame = (y_data.astype(np.uint16) << 6)
-                    else:
-                        # 8-bit YUV
-                        y_data = np.frombuffer(y_plane, dtype=np.uint8).reshape(frame.height, y_plane.line_size)
-                        y_data = y_data[:, :frame.width]
-                        np_frame = (y_data.astype(np.uint16) << 8)
-                else:
-                    # Native grayscale format
-                    np_frame = frame.to_ndarray(format='gray16le')
-
+                np_frame = _decode_pyav_frame_to_uint16(frame)
                 if dtype is None:
                     dtype = np_frame.dtype
                     print(f'  H264 decoded dtype: {dtype}, range: [{np_frame.min()}, {np_frame.max()}]')
@@ -4834,7 +4851,7 @@ class UNSPARZ:
             buf = []
             start = 0
             for frame in container.decode(stream):
-                np_frame = frame.to_ndarray(format="gray16le").astype(np.uint16, copy=False)
+                np_frame = _decode_pyav_frame_to_uint16(frame)
                 buf.append(np_frame)
                 if len(buf) == chunk_size:
                     end = start + len(buf)
