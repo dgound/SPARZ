@@ -5052,7 +5052,7 @@ class UNSPARZ:
         if frame_count != T:
             print(f"{debug_prefix}Warning: wrote {frame_count} pages but expected {T} for {filename}")
 
-    def _run_streaming(self):
+    def _run_streaming_impl(self):
         """Streaming-reconstruction driver. Memory bound: one chunk + final output."""
         print("Inflating images (streaming)...")
         if self.use_roi:
@@ -5105,15 +5105,18 @@ class UNSPARZ:
             gc.collect()
 
         print("Done.")
-        self.cleanup_temp_directories()
+
+    def _run_streaming(self):
+        try:
+            return self._run_streaming_impl()
+        finally:
+            self.cleanup_temp_directories()
 
     # ------------------------------------------------------------------
     # Legacy eager run (kept for streaming=False / zstd image stacks)
     # ------------------------------------------------------------------
 
-    def run(self):
-        if getattr(self, "streaming", False):
-            return self._run_streaming()
+    def _run_eager(self):
         print('Inflating images...')
         show_progress_bar = False
         try:
@@ -5235,6 +5238,11 @@ class UNSPARZ:
                         progress_bar.close()
                 gc.collect()
         print('Done.')
-        
-        # Clean up temporary directories used for MKV extraction
-        self.cleanup_temp_directories()
+
+    def run(self):
+        if getattr(self, "streaming", False):
+            return self._run_streaming()
+        try:
+            return self._run_eager()
+        finally:
+            self.cleanup_temp_directories()

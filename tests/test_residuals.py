@@ -804,6 +804,56 @@ def test_unsparz_init_cleans_mkv_temp_dirs_on_error(tmp_path, monkeypatch):
     assert not temp_dir.exists()
 
 
+def test_unsparz_streaming_run_cleans_mkv_temp_dirs_on_error(tmp_path, monkeypatch):
+    """Streaming reconstruction failures must still clean MKV temp dirs."""
+    temp_dir = tmp_path / "mkv_temp" / "streaming_failure"
+    temp_dir.mkdir(parents=True)
+    (temp_dir / "movieA_compression_level_0.mkv").write_bytes(b"fresh")
+
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.streaming = True
+    obj.temp_dirs_to_cleanup = [str(temp_dir)]
+
+    def _fail_streaming(_self):
+        raise RuntimeError("forced streaming failure")
+
+    monkeypatch.setattr(UNSPARZ, "_run_streaming_impl", _fail_streaming)
+
+    try:
+        obj.run()
+    except RuntimeError as e:
+        assert "forced streaming failure" in str(e)
+    else:
+        raise AssertionError("expected streaming failure")
+
+    assert not temp_dir.exists()
+
+
+def test_unsparz_eager_run_cleans_mkv_temp_dirs_on_error(tmp_path, monkeypatch):
+    """Legacy eager reconstruction failures must still clean MKV temp dirs."""
+    temp_dir = tmp_path / "mkv_temp" / "eager_failure"
+    temp_dir.mkdir(parents=True)
+    (temp_dir / "movieA_compression_level_0.mkv").write_bytes(b"fresh")
+
+    obj = UNSPARZ.__new__(UNSPARZ)
+    obj.streaming = False
+    obj.temp_dirs_to_cleanup = [str(temp_dir)]
+
+    def _fail_eager(_self):
+        raise RuntimeError("forced eager failure")
+
+    monkeypatch.setattr(UNSPARZ, "_run_eager", _fail_eager)
+
+    try:
+        obj.run()
+    except RuntimeError as e:
+        assert "forced eager failure" in str(e)
+    else:
+        raise AssertionError("expected eager failure")
+
+    assert not temp_dir.exists()
+
+
 def test_find_metadata_sidecars_exact_only_ignores_unmatched_singleton(tmp_path):
     """Exact metadata matching must not assign another video's lone JSON sidecar."""
     video = tmp_path / "movieB_compression_level_0.mkv"
