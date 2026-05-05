@@ -2557,6 +2557,21 @@ class SPARZIP:
                 npz_data = np.load(io.BytesIO(dctx.decompress(file_bytes)), allow_pickle=True)
             else:
                 npz_data = np.load(npz_path, allow_pickle=True)
+            if "encoding" in npz_data and str(npz_data["encoding"]) == "delta_shuffled_v2":
+                # Coords-only path: unshuffle the delta-encoded coord bytes and
+                # cumulative-sum back. Intensity data is intentionally skipped —
+                # the residual masker only needs positions.
+                shape = tuple(int(x) for x in npz_data["shape"])
+                coords_shape = tuple(int(x) for x in npz_data["coords_shape"])
+                shuffled_coords = npz_data["shuffled_coords"]
+                unshuffled_coord_bytes = self._unshuffle_bytes(
+                    shuffled_coords.tobytes(), itemsize=4
+                )
+                delta_coords = np.frombuffer(
+                    unshuffled_coord_bytes, dtype=np.int32
+                ).reshape(coords_shape)
+                coords = np.cumsum(delta_coords, axis=1)
+                return {"coords": np.asarray(coords), "shape": shape}
             if "encoding" in npz_data and str(npz_data["encoding"]) == "delta":
                 shape = tuple(int(x) for x in npz_data["shape"])
                 coords = np.cumsum(npz_data["delta_coords"], axis=1)

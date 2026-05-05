@@ -5,6 +5,7 @@ import sys
 
 import numpy as np
 import dask.array as da
+import sparse as sparse_mod
 
 try:
     import pytest
@@ -293,6 +294,57 @@ def test_compute_residual_chunk_shape_mismatch_raises():
         assert "shape mismatch" in str(e)
     else:
         raise AssertionError("expected ValueError on chunk shape mismatch")
+
+
+def test_sparzip_load_sparse_roi_coords_handles_delta_shuffled_v2(tmp_path):
+    """SPARZIP-side ROI loader must read the delta_shuffled_v2 NPZ format.
+
+    save_npz_with_metadata writes the ``delta_shuffled_v2`` encoding (after
+    ``main``'s byte-shuffle commits). _load_sparse_roi_coords must understand
+    that encoding because the residual generator calls it to decide which
+    pixels to mask in background mode. If it returns None, background-mode
+    residuals silently fall back to full-mode size — reconstruction stays
+    bit-exact but residual files are 2-5x larger than designed.
+
+    This test writes a real NPZ via the production code path, then asserts
+    the SPARZIP-side reader returns the original coords.
+    """
+    # Synthesize a small sparse ROI: 3 frames, 4x4 image, 3 nonzero pixels.
+    shape = (3, 4, 4)
+    coords = np.array([
+        [0, 1, 2],   # frame indices (must be sorted lex for delta encoding)
+        [1, 2, 3],   # row indices
+        [0, 1, 2],   # col indices
+    ], dtype=np.int64)
+    data = np.array([100, 200, 300], dtype=np.int16)
+    coo = sparse_mod.COO(coords=coords, data=data, shape=shape)
+
+    # Use a real SPARZIP through __new__ + the methods that don't touch I/O
+    # state. save_metadata_to_json=True keeps the metadata side-channel out of
+    # this round-trip — we only care about coords.
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.save_metadata_to_json = True
+
+    npz_path = str(tmp_path / "fixture.npz")
+    obj.save_npz_with_metadata(npz_path, coo, metadata_entry=None)
+
+    # Sanity: this is a zstd-compressed NPZ written via the new path.
+    assert os.path.exists(npz_path)
+    with open(npz_path, "rb") as f:
+        magic = f.read(4)
+    assert magic == b"\x28\xb5\x2f\xfd", "expected zstd-compressed NPZ"
+
+    # The bug: SPARZIP._load_sparse_roi_coords falls through every branch and
+    # returns None for delta_shuffled_v2. Background-mode residuals then end
+    # up unmasked.
+    roi_info = obj._load_sparse_roi_coords(npz_path)
+    assert roi_info is not None, (
+        "SPARZIP._load_sparse_roi_coords returned None — it does not recognize "
+        "the delta_shuffled_v2 encoding written by save_npz_with_metadata. "
+        "Background-mode residuals will silently store full-mode bytes."
+    )
+    assert tuple(roi_info["shape"]) == shape
+    np.testing.assert_array_equal(roi_info["coords"], coords)
 
 
 def _make_sparzip_for_process_images(bp1_arrays, bp2_arrays=None, peak_process=None):
