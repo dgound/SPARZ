@@ -1128,6 +1128,52 @@ def test_package_to_mkv_removes_generated_sources_after_success(tmp_path, monkey
     assert not residual_path.exists()
 
 
+def test_package_to_mkv_removes_dataset_metadata_json_after_full_success(tmp_path, monkeypatch):
+    import subprocess
+
+    video_path = tmp_path / "movieA_compression_level_0.mp4"
+    npz_path = tmp_path / "movieA.npz"
+    dataset_json = tmp_path / "dataset_metadata_bp1.json"
+    unrelated_json = tmp_path / "other_metadata_bp1.json"
+    per_video_json = tmp_path / "movieA_compression_level_0_metadata_bp1.json"
+    mkv_path = tmp_path / "movieA_compression_level_0.mkv"
+    video_path.write_bytes(b"video-bytes")
+    npz_path.write_bytes(b"npz-bytes")
+    dataset_json.write_text(json.dumps([{"tags": {"Software": "dataset"}}]))
+    unrelated_json.write_text(json.dumps([{"tags": {"Software": "keep"}}]))
+
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.output_path = str(tmp_path) + os.sep
+    obj.stem = "dataset"
+    obj.path_image_files1 = [str(tmp_path / "movieA.tiff")]
+    obj.processed_bp1 = [object()]
+    obj.single_plane = True
+    obj.extract_metadata_flag = True
+    obj.save_metadata_to_json = True
+    obj.metadata_bp1 = [{"tags": {"Software": "per-video"}}]
+    obj.metadata_bp2 = None
+    obj.validate_video_file = lambda _path: None
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(cmd, capture_output=True, text=True, timeout=None):
+        assert str(per_video_json) in cmd
+        assert str(dataset_json) not in cmd
+        mkv_path.write_bytes(b"mkv-with-attachments")
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    obj.package_to_mkv("x265", 0)
+
+    assert mkv_path.exists()
+    assert not dataset_json.exists()
+    assert not per_video_json.exists()
+    assert unrelated_json.exists()
+
+
 # ---------------------------------------------------------------------------
 # MKV sidecar validation
 # ---------------------------------------------------------------------------
