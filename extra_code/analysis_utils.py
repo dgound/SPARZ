@@ -12,6 +12,7 @@ from skimage.metrics import structural_similarity as ssim
 from sklearn.neighbors import NearestNeighbors
 import pandas as pd
 from natsort import natsorted
+import json
 
 
 # ============================================================================
@@ -365,6 +366,8 @@ def get_total_size_of_files(folder_path, file_extensions):
     return total_size
 
 
+
+
 def natural_sort_key(s):
     """
     Generate a key for natural sorting of strings with numbers.
@@ -381,6 +384,78 @@ def natural_sort_key(s):
     """
     return [int(text) if text.isdigit() else text.lower() 
             for text in re.split('([0-9]+)', s)]
+
+
+
+def get_dat_dimensions(folder_path):
+    """
+    Extract X and Y dimensions from the Vutara data.json file.
+    """
+    json_path = os.path.join(folder_path, 'data.json')
+    if not os.path.exists(json_path):
+        raise FileNotFoundError(f"Could not find data.json in {folder_path} to read .dat dimensions.")
+    
+    with open(json_path, 'r') as f:
+        config = json.load(f)
+        
+    try:
+        dim_x = config["value"]["Image"]["DimX"]
+        dim_y = config["value"]["Image"]["DimY"]
+        return int(dim_x), int(dim_y)
+    except KeyError:
+        raise ValueError("data.json does not contain the expected ['value']['Image']['DimX/DimY'] keys.")
+
+def calculate_ssim_dat_folder(original_folder, decompressed_folder, fixed_data_range=23000):
+    """
+    Calculate SSIM for all .dat files in two folders using a FIXED data range.
+    
+    Parameters:
+    -----------
+    original_folder : str
+        Path to folder with original .dat files (must contain data.json)
+    decompressed_folder : strs
+        Path to folder with decompressed .dat files
+    fixed_data_range : int
+        The absolute maximum pixel value of the camera (e.g., 16383 for 14-bit, 65535 for 16-bit)
+    """
+    dim_x, dim_y = get_dat_dimensions(original_folder)
+    
+    orig_files = natsorted([f for f in os.listdir(original_folder) if f.endswith('.dat')])
+    comp_files = natsorted([f for f in os.listdir(decompressed_folder) if f.endswith('.dat')])
+    
+    ssim_results = []
+    
+    for orig_file in orig_files:
+        if orig_file not in comp_files:
+            continue
+            
+        orig_path = os.path.join(original_folder, orig_file)
+        comp_path = os.path.join(decompressed_folder, orig_file)
+        
+        orig_data = np.fromfile(orig_path, dtype=np.uint16)
+        comp_data = np.fromfile(comp_path, dtype=np.uint16)
+        
+        frames = len(orig_data) // (dim_x * dim_y)
+        orig_frames = orig_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
+        comp_frames = comp_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
+        
+        file_ssim_scores = []
+        for i in range(frames):
+            orig_img = orig_frames[i]
+            comp_img = comp_frames[i]
+            
+            # FIX: Use the fixed, mathematically sound data range!
+            score = ssim(orig_img, comp_img, data_range=fixed_data_range)
+            file_ssim_scores.append(score)
+            
+        if file_ssim_scores:
+            ssim_results.append({
+                'original_file': orig_file,
+                'compressed_file': orig_file,
+                'ssim': np.median(file_ssim_scores) 
+            })
+            
+    return ssim_results
 
 
 # ============================================================================
