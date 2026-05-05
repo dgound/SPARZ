@@ -1408,6 +1408,18 @@ class SPARZIP:
                 sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
                 sp2 = [da.map_blocks(apply_where, map_kernel[i], self.bp2[i], dtype='int16') for i in range(len(map_kernel))]
 
+            if self.peak_process == 'median':
+                print('Applying median patch...')
+                new_bp1 = []
+                for block in self.bp1:
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1
+
+                new_bp2 = []
+                for block in self.bp2:
+                    new_bp2.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp2 = new_bp2
+
             print('Done.')
             # Step 6: Convert to sparse at the end
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
@@ -1432,6 +1444,13 @@ class SPARZIP:
             def apply_where(kernel, img):
                 return da.where(kernel, img, 0)
             sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+
+        if self.peak_process == 'median':
+            print('Applying median patch...')
+            new_bp1 = []
+            for block in self.bp1:
+                new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+            self.bp1 = new_bp1
 
         print('Done.')
         return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
@@ -3003,6 +3022,178 @@ class SPARZIP:
             self.zstd_compress(compression_level=compression_level, effect_size=0.5, power=0.95, compute_dict=compute_zstd_dict)
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
+        
+        # Create single MKV file if requested
+        if self.create_single_file:
+            self.package_to_mkv(codec, compression_level)
+
+        # Print compression statistics
+        self._print_compression_stats()
+
+    def package_to_mkv(self, codec, compression_level):
+        """
+        Package the video file and NPZ files into a single MKV container.
+        Uses ffmpeg-python to create an MKV file with the video as the main track
+        and NPZ files as attachments.
+        """
+        # Skip MKV packaging for zstd codec (creates .zst files, not video files)
+        if codec == 'zstd':
+            print('MKV packaging not applicable for zstd codec (creates .zst files, not video files).')
+            return
+            
+        print('Packaging files into single MKV container...')
+        
+        # Determine video file extension based on codec
+        if codec == 'prores':
+            video_ext = 'mov'
+        elif codec == 'ffv1':
+            video_ext = 'avi'
+        else:
+            video_ext = 'mp4'  # Default for x265, av1, x264, etc.
+        
+        # Find all generated video files (following the actual naming pattern)
+        video_files = []
+        mkv_files_to_create = []
+        
+        for k in range(len(self.processed_bp1)):
+            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.{video_ext}'
+            mkv_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.mkv'
+            
+            if os.path.exists(video_name1):
+                # Validate video file before adding to list
+                try:
+                    self.validate_video_file(video_name1)
+                    video_files.append(video_name1)
+                    mkv_files_to_create.append(mkv_name1)
+                except Exception as e:
+                    print(f"Warning: Skipping invalid video file {video_name1}: {e}")
+                    continue
+            
+            # Handle BP2 if not single plane
+            if not self.single_plane:
+                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.{video_ext}'
+                mkv_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.mkv'
+                
+                if os.path.exists(video_name2):
+                    # Validate video file before adding to list
+                    try:
+                        self.validate_video_file(video_name2)
+                        video_files.append(video_name2)
+                        mkv_files_to_create.append(mkv_name2)
+                    except Exception as e:
+                        print(f"Warning: Skipping invalid video file {video_name2}: {e}")
+                        continue
+        
+        if not video_files:
+            print('Warning: No video files found. Skipping MKV packaging.')
+            return
+
+        # Create MKV files for each video file
+        import subprocess
+        successful_count = 0
+        failed_count = 0
+
+        for video_file, mkv_file in zip(video_files, mkv_files_to_create):
+            try:
+                print(f'  Creating MKV: {os.path.basename(mkv_file)}...')
+
+                # Find the corresponding NPZ file for this video
+                # Video: {stem}_compression_level_{level}.mp4 -> NPZ: {stem}.npz
+                video_basename = os.path.basename(video_file)
+                # Remove _compression_level_X.ext suffix to get original stem
+                stem = video_basename.rsplit('_compression_level_', 1)[0]
+                corresponding_npz = os.path.join(self.output_path, f'{stem}.npz')
+
+                if not os.path.exists(corresponding_npz):
+                    print(f'  WARNING: No matching NPZ file found for {video_basename}')
+                    npz_to_attach = []
+                else:
+                    npz_to_attach = [corresponding_npz]
+
+                # Build ffmpeg command manually for better control over attachments
+                cmd = [
+                    'ffmpeg', '-y',  # Overwrite output
+                    '-i', video_file,  # Input video
+                ]
+
+                # Add NPZ file as attachment (only the corresponding one)
+                for i, npz_file in enumerate(npz_to_attach):
+                    cmd.extend(['-attach', npz_file])
+                    # Add metadata for each attachment
+                    cmd.extend(['-metadata:s:t:{}'.format(i), 'mimetype=application/octet-stream'])
+                    cmd.extend(['-metadata:s:t:{}'.format(i), 'filename={}'.format(os.path.basename(npz_file))])
+                
+                # Add output options
+                cmd.extend([
+                    '-c', 'copy',  # Copy streams without re-encoding
+                    '-map', '0:0',  # Map video stream from first input
+                    '-loglevel', 'error',  # Show only errors
+                    mkv_file  # Output file
+                ])
+                
+                # Run the command with timeout
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                
+                if result.returncode != 0:
+                    print(f'  ERROR: FFmpeg failed creating {os.path.basename(mkv_file)}')
+                    print(f'  FFmpeg error: {result.stderr}')
+                    failed_count += 1
+                    
+                    # Additional diagnostic for common errors
+                    if 'moov atom not found' in result.stderr:
+                        print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} is corrupted (missing moov atom)')
+                    elif 'Invalid data found' in result.stderr:
+                        print(f'  DIAGNOSIS: Input video file {os.path.basename(video_file)} contains invalid data')
+                    
+                    continue
+                
+                # Verify the output MKV file was created successfully
+                if not os.path.exists(mkv_file):
+                    print(f'  ERROR: MKV file was not created: {mkv_file}')
+                    failed_count += 1
+                    continue
+                
+                mkv_size = os.path.getsize(mkv_file)
+                video_size = os.path.getsize(video_file)
+                
+                # MKV should be at least as large as the video (plus attachments)
+                if mkv_size < video_size:
+                    print(f'  WARNING: MKV file seems too small ({mkv_size} bytes vs video {video_size} bytes)')
+                
+                successful_count += 1
+                print(f'  SUCCESS: Created {os.path.basename(mkv_file)} ({mkv_size / (1024*1024):.1f} MB)')
+                print(f'    - Video: {os.path.basename(video_file)}')
+                print(f'    - Attachments: {len(npz_to_attach)} NPZ file(s)')
+
+                # Remove source files after successful MKV creation
+                try:
+                    os.remove(video_file)
+                    for npz_file in npz_to_attach:
+                        os.remove(npz_file)
+                except Exception as e:
+                    print(f'  WARNING: Could not remove source files: {e}')
+
+            except subprocess.TimeoutExpired:
+                print(f'  ERROR: Timeout creating MKV for {os.path.basename(video_file)}')
+                failed_count += 1
+                continue
+
+            except Exception as e:
+                print(f'  ERROR: Unexpected error creating MKV for {os.path.basename(video_file)}: {e}')
+                failed_count += 1
+                continue
+
+        # Summary
+        print(f'\nMKV Packaging Summary:')
+        print(f'  Successful: {successful_count}')
+        print(f'  Failed: {failed_count}')
+
+        if failed_count > 0:
+            print(f'\nWARNING: {failed_count} MKV file(s) could not be created.')
+            print('  Check the error messages above for details.')
+            print('  The original video and NPZ files are still available.')
 
         # Optional exact-reconstruction residual sidecars for video codecs
         if self.save_residuals and codec in ('x265', 'av1', 'x264', 'prores', 'ffv1', 'zstd', 'user'):
@@ -3941,6 +4132,392 @@ class UNSPARZ:
                 else:
                     # Legacy fallback: peek into bp1's directory for "_bp2_" files
                     bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
+                for npz_file in sorted(bp2_files):
+                    metadata_entry = self.load_metadata_from_npz(npz_file)
+                    if metadata_entry:
+                        metadata_bp2.append(metadata_entry)
+                if metadata_bp2:
+                    print(f'Loaded BP2 metadata from {len(metadata_bp2)} NPZ files')
+
+        except Exception as e:
+            print(f'Error loading metadata from NPZ: {e}. Falling back to encoded metadata.')
+
+        # --- Fallback to basic encoded metadata ---
+        if not metadata_bp1:
+            print('No metadata found in JSON or NPZ files. Using basic encoded file metadata.')
+            return self.extract_encoded_metadata()
+
+        return metadata_bp1, metadata_bp2
+
+    def extract_encoded_metadata(self):
+        """Extract metadata from encoded video files if possible, or create basic metadata"""
+        print('Extracting metadata from encoded files...')
+        metadata_bp1 = []
+        
+        # For encoded files, we can't extract original TIFF metadata
+        # But we can create basic metadata structure
+        for file_path in self.path_encoded_bp1:
+            metadata = {
+                'source_file': os.path.basename(file_path),
+                'is_encoded': True,
+                'file_type': 'encoded_video'
+            }
+            metadata_bp1.append(metadata)
+        
+        metadata_bp2 = []
+        if self.path_encoded_bp2:
+            for file_path in self.path_encoded_bp2:
+                metadata = {
+                    'source_file': os.path.basename(file_path),
+                    'is_encoded': True,
+                    'file_type': 'encoded_video'
+                }
+                metadata_bp2.append(metadata)
+        
+        return metadata_bp1, metadata_bp2 if self.path_encoded_bp2 else None
+
+    def format_metadata_for_tifffile(self, metadata, frame_index=None):
+        """Format extracted metadata for tifffile.TiffWriter - UNSPARZ version"""
+        if not metadata or 'error' in metadata:
+            return None, []
+        
+        description = None
+        extratags = []
+        
+        # For the first frame, use global metadata
+        if frame_index is None or frame_index == 0:
+            # First priority: OME-XML from original metadata (regardless of is_encoded flag)
+            if metadata.get('is_ome') and 'ome_xml' in metadata:
+                description = metadata['ome_xml']
+                extratags.append((305, 's', 0, "UNSPARZ with OME-XML", True))
+                return description, extratags
+            
+            # Second priority: For encoded files without OME-XML, add basic info
+            if metadata.get('is_encoded') and not metadata.get('is_ome'):
+                description = f"Reconstructed from {metadata['source_file']} | Processed by UNSPARZ"
+                extratags.append((305, 's', 0, "UNSPARZ", True))
+            else:
+                # Same logic as SPARZIP for original TIFF files
+                description_parts = []
+                
+                # Add ImageJ metadata if present
+                if metadata.get('is_imagej') and 'imagej_metadata' in metadata:
+                    try:
+                        imagej_meta = metadata['imagej_metadata']
+                        if isinstance(imagej_meta, dict):
+                            for key, value in imagej_meta.items():
+                                if isinstance(value, (str, int, float)):
+                                    description_parts.append(f"{key}={value}")
+                    except:
+                        pass
+                
+                # Add TIFF tags to description and extratags
+                if 'tags' in metadata:
+                    tags = metadata['tags']
+                    
+                    # ImageDescription is the most important
+                    if 'ImageDescription' in tags:
+                        existing_desc = tags['ImageDescription']
+                        if existing_desc and isinstance(existing_desc, str):
+                            description = existing_desc
+                            if description_parts:
+                                description += f" | {' | '.join(description_parts)}"
+                    
+                    # Add other important tags as extratags
+                    for tag_name, tag_value in tags.items():
+                        if tag_name == 'Software' and isinstance(tag_value, str):
+                            extratags.append((305, 's', 0, f"{tag_value} -> UNSPARZ", True))  # Software tag
+                        elif tag_name == 'DateTime' and isinstance(tag_value, str):
+                            extratags.append((306, 's', 0, tag_value, True))  # DateTime tag
+                        elif tag_name not in ['ImageDescription', 'Software', 'DateTime'] and isinstance(tag_value, (str, int, float)):
+                            description_parts.append(f"{tag_name}={tag_value}")
+                
+                # Create description from parts if not already set
+                if description is None and description_parts:
+                    description = ' | '.join(description_parts)
+                
+                # Add default software tag if not present
+                if not any(tag[0] == 305 for tag in extratags):
+                    extratags.append((305, 's', 0, "UNSPARZ", True))
+        
+        else:
+            self.output_path = output_path
+        self.chunk_size = chunk_size
+        
+        # Extract metadata from encoded files for preservation
+        self.metadata_bp1, self.metadata_bp2 = self.load_original_metadata()
+        
+        # Restore numeric values
+        if self.metadata_bp1:
+            self.metadata_bp1 = [restore_numeric_values(meta) for meta in self.metadata_bp1]
+        if self.metadata_bp2:
+            self.metadata_bp2 = [restore_numeric_values(meta) for meta in self.metadata_bp2]
+
+    def extract_from_mkv(self, mkv_files, path_encoded_bp2):
+        """
+        Extract video and NPZ files from MKV containers.
+        Returns paths to extracted video files and updates sparse file paths.
+        """
+        import subprocess
+        extracted_video_paths = []
+        
+        for mkv_file in mkv_files:
+            print(f'Extracting from MKV: {mkv_file}')
+            
+            # Create temporary directory for extraction
+            temp_dir = os.path.join(os.path.dirname(mkv_file), 'mkv_temp')
+            os.makedirs(temp_dir, exist_ok=True)
+            
+            # Track temp directory for cleanup
+            if temp_dir not in self.temp_dirs_to_cleanup:
+                self.temp_dirs_to_cleanup.append(temp_dir)
+            
+            try:
+                # Probe to detect codec and determine output container
+                probe = ffmpeg.probe(mkv_file)
+                video_codec = None
+                for stream in probe.get('streams', []):
+                    if stream.get('codec_type') == 'video':
+                        video_codec = stream.get('codec_name', '')
+                        break
+
+                # Choose container based on codec
+                if video_codec and 'prores' in video_codec.lower():
+                    video_ext = '.mov'
+                elif video_codec and video_codec.lower() == 'ffv1':
+                    video_ext = '.avi'
+                else:
+                    video_ext = '.mp4'
+
+                video_name = os.path.splitext(os.path.basename(mkv_file))[0] + video_ext
+                video_path = os.path.join(temp_dir, video_name)
+
+                # Check if already extracted
+                if os.path.exists(video_path):
+                    print(f'Video already extracted: {video_name}')
+                    extracted_video_paths.append(video_path)
+                else:
+                    # Use ffmpeg to extract the video stream
+                    ffmpeg.input(mkv_file).output(video_path, vcodec='copy').run(
+                        overwrite_output=True, capture_stdout=True, capture_stderr=True
+                    )
+                    extracted_video_paths.append(video_path)
+                    print(f'Extracted video: {video_name}')
+                
+                # Extract attachments (NPZ files) using probe data from above
+                # Find attachment streams and extract using ffmpeg command
+                attachment_count = 0
+                attachment_indices = []  # Store actual stream indices for attachments
+                
+                for stream in probe.get('streams', []):
+                    if stream.get('codec_type') == 'attachment':
+                        stream_index = stream['index']
+                        attachment_filename = stream.get('tags', {}).get('filename', f'attachment_{attachment_count}.npz')
+                        attachment_path = os.path.join(temp_dir, attachment_filename)
+                        
+                        # Check if already extracted
+                        if os.path.exists(attachment_path):
+                            print(f'NPZ already extracted: {attachment_filename}')
+                            attachment_count += 1
+                            continue
+                        
+                        # Use subprocess to extract attachment
+                        # FIXED: Use the actual attachment index for -dump_attachment
+                        # The :t:N syntax needs N to be the attachment index among attachments, not stream index
+                        cmd = [
+                            'ffmpeg', '-dump_attachment:t:{}'.format(attachment_count), attachment_path,
+                            '-i', mkv_file
+                        ]
+                        
+                        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                        if result.returncode == 0 and os.path.exists(attachment_path):
+                            print(f'Extracted NPZ: {attachment_filename}')
+                            attachment_count += 1
+                        else:
+                            # Method 2: Use -map with actual stream index
+                            print(f'Method 1 failed, trying alternative extraction for {attachment_filename}')
+                            cmd2 = [
+                                'ffmpeg', '-y', '-i', mkv_file,
+                                '-map', f'0:{stream_index}',  # Use actual stream index
+                                '-c', 'copy', attachment_path
+                            ]
+                            
+                            result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
+                            if result2.returncode == 0 and os.path.exists(attachment_path):
+                                print(f'Extracted NPZ: {attachment_filename} (method 2)')
+                                attachment_count += 1
+                            else:
+                                # If both methods fail, try the direct extraction method
+                                cmd3 = [
+                                    'ffmpeg', '-i', mkv_file,
+                                    '-dump_attachment:t', attachment_path
+                                ]
+                                result3 = subprocess.run(cmd3, capture_output=True, text=True, timeout=10)
+                                if result3.returncode == 0 and os.path.exists(attachment_path):
+                                    print(f'Extracted NPZ: {attachment_filename} (method 3)')
+                                    attachment_count += 1
+                                else:
+                                    print(f'Failed to extract {attachment_filename}')
+                                    if result2.stderr:
+                                        print(f'Error: {result2.stderr[:200]}')
+                
+                print(f'Extracted {attachment_count} NPZ files from {mkv_file}')
+                
+            except ffmpeg.Error as e:
+                print(f'Error extracting from MKV {mkv_file}: {e}')
+                if e.stderr:
+                    print(f'FFmpeg stderr: {e.stderr.decode()}')
+            except Exception as e:
+                print(f'Unexpected error extracting from MKV {mkv_file}: {e}')
+        
+        # Update sparse file paths to point to extracted NPZ files
+        if extracted_video_paths:
+            temp_dir = os.path.dirname(extracted_video_paths[0])
+            # Check for NPZ files in temp directory
+            npz_files = glob.glob(os.path.join(temp_dir, '*.npz'))
+            if npz_files:
+                print(f'Found {len(npz_files)} NPZ files in temp directory')
+                self.path_sparse_bp1 = os.path.join(temp_dir, '*.npz')
+            else:
+                # If no NPZ in temp, check the MKV directory itself
+                mkv_dir = os.path.dirname(mkv_files[0])
+                npz_files = glob.glob(os.path.join(mkv_dir, '*.npz'))
+                if npz_files:
+                    print(f'Using {len(npz_files)} NPZ files from MKV directory')
+                    self.path_sparse_bp1 = os.path.join(mkv_dir, '*.npz')
+                else:
+                    print('Warning: No NPZ files found')
+                    self.path_sparse_bp1 = None
+            
+            if path_encoded_bp2:
+                self.path_sparse_bp2 = os.path.join(temp_dir, '*bp2*.npz')  # Assume BP2 files have 'bp2' in name
+            else:
+                self.path_sparse_bp2 = None
+        
+        return extracted_video_paths, None
+
+    def cleanup_temp_directories(self):
+        """
+        Clean up temporary directories created during MKV extraction.
+        """
+        if hasattr(self, 'temp_dirs_to_cleanup') and self.temp_dirs_to_cleanup:
+            import shutil
+            for temp_dir in self.temp_dirs_to_cleanup:
+                try:
+                    if os.path.exists(temp_dir):
+                        shutil.rmtree(temp_dir)
+                        print(f'Cleaned up temporary directory: {temp_dir}')
+                except Exception as e:
+                    print(f'Warning: Failed to cleanup temporary directory {temp_dir}: {e}')
+            self.temp_dirs_to_cleanup = []
+
+    def load_metadata_from_npz(self, npz_file_path):
+        """
+        Load metadata from NPZ file that was saved with sparse matrix.
+        Compatible with both original (45e86e9) and current formats.
+        """
+        try:
+            # Load the NPZ file
+            npz_data = np.load(npz_file_path, allow_pickle=True)
+            
+            # Check for metadata in different formats
+            if 'metadata' in npz_data:
+                # Original format from 45e86e9 - use 'metadata' key
+                metadata_json_str = npz_data['metadata'].item()
+                metadata = json.loads(metadata_json_str)
+                return metadata
+            elif 'metadata_json' in npz_data:
+                # Current format - use 'metadata_json' key
+                metadata_json_str = npz_data['metadata_json'].item()
+                metadata = json.loads(metadata_json_str)
+                return metadata
+            else:
+                return {}
+                
+        except Exception as e:
+            print(f'Error loading metadata from {npz_file_path}: {e}')
+            return {}
+
+    def load_original_metadata(self):
+        """
+        Load original TIFF metadata from JSON files or embedded in NPZ files.
+        """
+        print('Loading metadata...')
+        
+        # --- Try loading from JSON files first ---
+        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
+        metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+
+        # If exact stem match not found, try auto-detection
+        if not os.path.exists(metadata_file_bp1):
+            print(f'Exact metadata file not found: {metadata_file_bp1}')
+            print('Attempting to auto-detect metadata files...')
+            
+            # Look for any *_metadata_bp1.json files in the output directory
+            pattern_bp1 = os.path.join(self.output_path, '*_metadata_bp1.json')
+            json_files_bp1 = glob.glob(pattern_bp1)
+            
+            if json_files_bp1:
+                if len(json_files_bp1) > 1:
+                    print(f'Warning: Multiple BP1 metadata files found: {json_files_bp1}')
+                    print(f'Using first match: {json_files_bp1[0]}')
+                metadata_file_bp1 = json_files_bp1[0]  # Use first match
+                print(f'Auto-detected BP1 metadata file: {metadata_file_bp1}')
+                
+                # Try to find corresponding BP2 file with same prefix
+                detected_stem = os.path.basename(metadata_file_bp1).replace('_metadata_bp1.json', '')
+                metadata_file_bp2 = os.path.join(self.output_path, f'{detected_stem}_metadata_bp2.json')
+                
+                if os.path.exists(metadata_file_bp2):
+                    print(f'Auto-detected BP2 metadata file: {metadata_file_bp2}')
+                else:
+                    # Also try pattern matching for BP2
+                    pattern_bp2 = os.path.join(self.output_path, '*_metadata_bp2.json')
+                    json_files_bp2 = glob.glob(pattern_bp2)
+                    if json_files_bp2:
+                        metadata_file_bp2 = json_files_bp2[0]
+                        print(f'Auto-detected BP2 metadata file: {metadata_file_bp2}')
+
+        metadata_bp1 = None
+        metadata_bp2 = None
+
+        if os.path.exists(metadata_file_bp1):
+            try:
+                with open(metadata_file_bp1, 'r') as f:
+                    metadata_bp1 = json.load(f)
+                print(f'Loaded metadata for BP1 from: {metadata_file_bp1}')
+                if os.path.exists(metadata_file_bp2):
+                    with open(metadata_file_bp2, 'r') as f:
+                        metadata_bp2 = json.load(f)
+                    print(f'Loaded metadata for BP2 from: {metadata_file_bp2}')
+                return metadata_bp1, metadata_bp2
+            except Exception as e:
+                print(f'Error loading metadata from JSON file: {e}. Falling back to other methods.')
+
+        # --- If JSON not found, try loading from NPZ files ---
+        print('No JSON metadata found. Trying to load from NPZ files...')
+        metadata_bp1 = []
+        try:
+            if hasattr(self, 'path_sparse_bp1') and self.path_sparse_bp1:
+                bp1_pattern = self.path_sparse_bp1
+            else:
+                bp1_pattern = os.path.join(self.output_path, '*.npz')
+            bp1_files = sorted(glob.glob(bp1_pattern))
+            
+            for npz_file in bp1_files:
+                if '_bp2_' in npz_file or npz_file.endswith('_bp2.npz'):
+                    continue
+                metadata_entry = self.load_metadata_from_npz(npz_file)
+                if metadata_entry:
+                    metadata_bp1.append(metadata_entry)
+            
+            if metadata_bp1:
+                print(f'Loaded BP1 metadata from {len(metadata_bp1)} NPZ files')
+            
+            # BP2 logic
+            if self.path_encoded_bp2:
+                metadata_bp2 = []
+                bp2_files = [f for f in bp1_files if '_bp2_' in f or f.endswith('_bp2.npz')]
                 for npz_file in sorted(bp2_files):
                     metadata_entry = self.load_metadata_from_npz(npz_file)
                     if metadata_entry:

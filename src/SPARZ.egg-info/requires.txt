@@ -8,7 +8,8 @@ PyQt6
 scikit-image
 scipy
 sparse
-statsmodels
-tifffile
-tqdm
+av
+jinja2
 zstandard
+tqdm
+PyQt6

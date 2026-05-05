@@ -25,10 +25,11 @@ setup(
         'scikit-image',
         'scipy',
         'sparse',
-        'statsmodels',
-        'tifffile',
-        'tqdm',
+        'av',
+        'jinja2',
         'zstandard',
+        'tqdm',
+        'PyQt6',
     ],
     entry_points={
         'console_scripts': [
