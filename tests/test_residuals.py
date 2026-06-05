@@ -413,6 +413,39 @@ def test_process_images_median_patch_runs_before_sparse_graph():
     assert processed[0].compute().todense().sum() == 0
 
 
+def test_sparzip_constructor_accepts_single_page_tiffs(tmp_path):
+    """Regression: SPARZIP.__init__ must not depend on attributes assigned after load_images.
+
+    load_images()'s single-page-TIFF branch iterates ``range(0, len(files), self.stack_size)``,
+    so ``self.stack_size`` must be set before load_images is called. Previously the
+    assignment happened ~23 lines later, causing ``AttributeError: 'SPARZIP' object has
+    no attribute 'stack_size'`` for any user with one TIFF per frame (the dominant
+    microscopy layout).
+    """
+    import tifffile
+    data_dir = tmp_path / "data"; data_dir.mkdir()
+    out_dir = tmp_path / "out"; out_dir.mkdir()
+    # Real single-page TIFFs (2-D arrays → tifffile writes one page per file)
+    rng = np.random.default_rng(3)
+    for i in range(5):
+        frame = rng.integers(10, 2000, size=(16, 16), dtype=np.uint16)
+        tifffile.imwrite(str(data_dir / f"img_{i:03d}.tif"), frame)
+
+    # Construction must succeed without AttributeError.
+    z = SPARZIP(
+        path_image_files1=str(data_dir / "*.tif"),
+        stem="img",
+        output_path=str(out_dir) + "/",
+        stack_size=3,           # forces the for-loop branch
+        kernel_size=5,
+        num_workers=1,
+        num_dask_workers=1,
+    )
+    assert z.stack_size == 3
+    # With 5 files and stack_size=3, load_images should produce 2 stacks.
+    assert len(z.bp1) == 2
+
+
 # ---------------------------------------------------------------------------
 # Mode resolution
 # ---------------------------------------------------------------------------

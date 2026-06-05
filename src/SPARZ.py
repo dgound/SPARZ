@@ -958,6 +958,10 @@ class SPARZIP:
         self.path_image_files1 = sorted(glob.glob(path_image_files1))
         if self.single_plane==False:
             self.path_image_files2 = sorted(glob.glob(path_image_files2))
+        # load_images reads self.stack_size in the single-page-TIFF branch, so it
+        # must be set before the call. (Other state set later in __init__ doesn't
+        # affect load_images, so we keep this fix tightly scoped.)
+        self.stack_size = stack_size
         self.bp1, self.bp2 = self.load_images(path_image_files1, path_image_files2)
         # Optimized dtype checking - check metadata first without computing arrays
         try:
@@ -981,7 +985,8 @@ class SPARZIP:
         # self.compression_level = compression_level
         # Dynamic batch sizing based on available memory
         self.batch_size = self.get_optimal_batch_size(batch_size)
-        self.stack_size = stack_size
+        # self.stack_size assigned earlier (load_images needs it); leave the
+        # other late-init attributes as they were.
         self.find_roi = find_peaks
         self.num_workers = num_workers
         self.num_dask_workers = num_dask_workers
