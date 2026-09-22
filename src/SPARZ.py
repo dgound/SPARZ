@@ -955,9 +955,17 @@ class SPARZIP:
         self.single_plane = False
         if path_image_files2 is None:
             self.single_plane = True
-        self.path_image_files1 = sorted(glob.glob(path_image_files1))
+        # Allow passing a specific list of files!
+        if isinstance(path_image_files1, list):
+            self.path_image_files1 = sorted(path_image_files1)
+        else:
+            self.path_image_files1 = sorted(glob.glob(path_image_files1))
+            
         if self.single_plane==False:
-            self.path_image_files2 = sorted(glob.glob(path_image_files2))
+            if isinstance(path_image_files2, list):
+                self.path_image_files2 = sorted(path_image_files2)
+            else:
+                self.path_image_files2 = sorted(glob.glob(path_image_files2))
         self.bp1, self.bp2 = self.load_images(path_image_files1, path_image_files2)
         # Optimized dtype checking - check metadata first without computing arrays
         try:
@@ -1109,11 +1117,11 @@ class SPARZIP:
             dimY = data_tmp.loc['Image'].value['RecordDimY']
             p1 = []
             for dat_file in files1:
-                raw_data = np.memmap(dat_file, dtype='uint16')
-                img_nums = len(raw_data) // (dimX * dimY)
-                p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16').rechunk((1, dimY, dimX)))
+                file_bytes = os.path.getsize(dat_file) 
+                img_nums = file_bytes // (dimX * dimY * 2)
+                p1.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16')) #.rechunk((1, dimY, dimX)))
                 # Explicit cleanup of memory mapping to prevent memory leaks
-                del raw_data
+                
         else:
             raise ValueError(f'Unsupported file extension: {ext}.Supported extensions are .tiff, .tif and SRX .dat')
         if self.single_plane:
@@ -1142,11 +1150,11 @@ class SPARZIP:
                 raise ValueError(f"data.json not found in directory: {dir1}")
             p2 = []
             for dat_file in files2:
-                raw_data = np.memmap(dat_file, dtype='uint16')
-                img_nums = len(raw_data) // (dimX * dimY)
+                file_bytes = os.path.getsize(dat_file)
+                img_nums = file_bytes // (dimX * dimY * 2)
                 p2.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
                 # Explicit cleanup of memory mapping to prevent memory leaks
-                del raw_data
+                
         else:
             raise ValueError(f'Unsupported file extension: {ext}')
         return p1, p2
@@ -1295,34 +1303,25 @@ class SPARZIP:
                 new_block[i, r_start:r_end, c_start:c_end] = median_val
         return new_block
 
-    def _process_frame_to_sparse_single(self, frame):
+    def _process_block_to_sparse_single(self, block):
         """
-        Fused operation for single plane: find peaks, create mask, apply kernel, extract sparse.
-        Reduces dask task graph from 5 operations to 1 per block.
+        Fused operation for a whole 3D block (an entire .dat file).
+        Hides the frame-by-frame loop from Dask to prevent Task Graph Overload
         """
-        frame_2d = frame[0, :, :] if frame.ndim == 3 else frame
+        T, H, W = block.shape
+        masked_3d = np.zeros_like(block, dtype='int16')
 
-        # Find peaks
-        peaks = peak_local_max(frame_2d,
-                              threshold_rel=self.rel_threshold,
-                              min_distance=1,
-                              footprint=np.ones((self.kernel_size, self.kernel_size)))
+        for t in range(T):
+            frame_2d = block[t]
+            peaks = self.find_peaks(frame_2d, self.kernel_size, min_distance=1)
 
-        if len(peaks) == 0:
-            # Return empty sparse matrix
-            return sparse.COO(np.zeros_like(frame_2d, dtype='int16'))
+            if len(peaks) > 0:
+                mask = np.zeros(frame_2d.shape, dtype='int16')
+                mask[peaks[:, 0], peaks[:, 1]] = 1
+                kernel_mask = self.add_kernel(mask, self.kernel_size)
+                masked_3d[t] = np.where(kernel_mask, frame_2d, 0).astype('int16')
 
-        # Create mask at peak locations
-        mask = np.zeros(frame_2d.shape, dtype='int16')
-        mask[peaks[:, 0], peaks[:, 1]] = 1
-
-        # Expand with kernel
-        kernel_mask = self.add_kernel(mask, self.kernel_size)
-
-        # Extract values where kernel is non-zero
-        masked = np.where(kernel_mask, frame_2d, 0).astype('int16')
-
-        return sparse.COO(masked)
+        return sparse.COO(masked_3d)
 
     def _process_biplane_frame(self, frame1, frame2):
         """
@@ -1381,24 +1380,13 @@ class SPARZIP:
     def process_images(self):
         print('Processing images...')
 
-        if self.peak_process == 'median':
-            print('Applying median patch...')
-            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
-            if not self.single_plane:
-                self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
-
-        # Step 1: Find peaks in plane 1
-        map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
-
         if self.single_plane == False:
+            # (Leave biplane exactly as it was)
+            map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
             assert len(self.bp1) == len(self.bp2), 'Error: Both biplanes must have the same number of images.'
-            # Step 2: Find peaks in plane 2
             map2 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp2]
-            # Step 3: Union of peaks from both planes
-            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[i][0,:,:].shape, dtype='int16') for i in range(len(map1))]
-            # Step 4: Expand peaks with kernel
+            map_union = [da.map_blocks(self.union, map1[i], map2[i], self.bp1[0][0,:,:].shape, dtype='int16') for i in range(len(map1))]
             map_kernel = [blck.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for blck in map_union]
-            # Step 5: Apply mask to extract ROI values
             try:
                 sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
                 sp2 = [da.where(map_kernel[i], self.bp2[i], 0) for i in range(len(map_kernel))]
@@ -1421,39 +1409,25 @@ class SPARZIP:
                 self.bp2 = new_bp2
 
             print('Done.')
-            # Step 6: Convert to sparse at the end
             return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], [sp2[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp2))]
 
-        # Single plane processing
-        print('Single plane')
-        def add_mask(peaks, frame_shape):
-            tmp = np.zeros(frame_shape, dtype='int16')
-            tmp[peaks[:, 0], peaks[:, 1]] = 1
-            return tmp
-        map_mask = [
-            b.map_blocks(
-                lambda x, frame_shape=self.bp1[i][0,:,:].shape: add_mask(x, frame_shape),
-                dtype='int16',
-            )
-            for i, b in enumerate(map1)
-        ]
-        map_kernel = [k.map_blocks(self.add_kernel, self.kernel_size, dtype='int16') for k in map_mask]
-        try:
-            sp1 = [da.where(map_kernel[i], self.bp1[i], 0) for i in range(len(map_kernel))]
-        except TypeError:
-            def apply_where(kernel, img):
-                return da.where(kernel, img, 0)
-            sp1 = [da.map_blocks(apply_where, map_kernel[i], self.bp1[i], dtype='int16') for i in range(len(map_kernel))]
+        else:
+            # --- (No map_blocks) ---
+            print('Single plane (Using pure Delayed execution!)')
+            from dask import delayed
+            
+            # Use pure delayed objects.
+            sp1 = [delayed(self._process_block_to_sparse_single)(blck) for blck in self.bp1]
 
-        if self.peak_process == 'median':
-            print('Applying median patch...')
-            new_bp1 = []
-            for block in self.bp1:
-                new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
-            self.bp1 = new_bp1
+            if self.peak_process == 'median':
+                print('Applying median patch...')
+                new_bp1 = []
+                for block in self.bp1:
+                    new_bp1.append(block.map_blocks(self.median_patch, dtype=block.dtype))
+                self.bp1 = new_bp1
 
-        print('Done.')
-        return [sp1[i].map_blocks(sparse.COO, dtype='int16') for i in range(len(sp1))], None
+            print('Done.')
+            return sp1, None
 
     def extract_metadata(self):
         """
