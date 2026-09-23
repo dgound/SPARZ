@@ -18,7 +18,11 @@ def get_default_stem(input_path):
     """Extract stem from input path pattern."""
     # Handle glob patterns
     path = input_path.replace('*', '').replace('?', '')
-    return Path(path).stem or 'output'
+    stem = Path(path).stem
+    # A bare glob like "data/*.tiff" leaves ".tiff", which would name hidden files
+    if not stem or stem.startswith('.'):
+        return 'output'
+    return stem
 
 
 def cmd_sparz(args):
