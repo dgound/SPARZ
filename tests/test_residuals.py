@@ -403,16 +403,6 @@ def test_process_images_biplane_uses_each_stack_shape():
     assert bp2_second_dense[0, 4, 4] == 100
 
 
-def test_process_images_median_patch_runs_before_sparse_graph():
-    frame = np.zeros((1, 5, 5), dtype=np.uint16)
-    frame[0, 2, 2] = 100
-
-    obj = _make_sparzip_for_process_images([frame], peak_process="median")
-    processed, _ = obj.process_images()
-
-    assert processed[0].compute().todense().sum() == 0
-
-
 def test_sparzip_constructor_accepts_single_page_tiffs(tmp_path):
     """Regression: SPARZIP.__init__ must not depend on attributes assigned after load_images.
 
@@ -2074,6 +2064,318 @@ class _FallbackCapsys:
         r.out = text
         r.err = ""
         return r
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for the core bug fixes (MKV, naming, metadata, median, ...)
+# ---------------------------------------------------------------------------
+
+def _skip_without_ffmpeg():
+    """Skip (or, without pytest, silently return) when ffmpeg/ffprobe are missing."""
+    import shutil
+    if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
+        if pytest is not None:
+            pytest.skip("ffmpeg/ffprobe not on PATH")
+        return True
+    return False
+
+
+def _write_test_stack(path, seed=0, T=6, H=32, W=32):
+    """Write a small multipage TIFF (T > 4 so tifffile does not treat T as samples)."""
+    import tifffile
+    stack = np.random.default_rng(seed).integers(100, 300, size=(T, H, W), dtype=np.uint16)
+    for t in range(T):
+        stack[t, 5 + t, 10] = 5000
+    tifffile.imwrite(str(path), stack)
+    return stack
+
+
+def test_single_plane_mkv_roundtrip_is_exact(tmp_path):
+    """Single-plane MKV decode used to raise AttributeError on path_sparse_bp2,
+    and attachment extraction wrote the NPZ bytes under the residual's name."""
+    if _skip_without_ffmpeg():
+        return
+    import glob as _glob
+    import tifffile
+    inp, out, rec = tmp_path / "in", tmp_path / "out", tmp_path / "rec"
+    for d in (inp, out, rec):
+        d.mkdir()
+    original = _write_test_stack(inp / "stackA.tif")
+
+    z = SPARZIP(path_image_files1=str(inp / "*.tif"), stem="s", output_path=str(out) + "/",
+                save_residuals=True, create_single_file=True, num_workers=1)
+    z.run(codec="x265", compression_level=0)
+    assert _glob.glob(str(out / "*.mkv"))
+
+    u = UNSPARZ(path_sparse_bp1=None, path_encoded_bp1=str(out / "*.mkv"),
+                stem="r", output_path=str(rec) + "/")
+    u.run()
+    outputs = _glob.glob(str(rec / "*.tiff"))
+    assert len(outputs) == 1
+    np.testing.assert_array_equal(tifffile.imread(outputs[0]), original)
+    # the per-MKV temp dir and its empty mkv_temp/ parent are both removed
+    assert not (out / "mkv_temp").exists()
+
+
+def test_eager_biplane_output_has_single_extension(tmp_path):
+    """Eager bp2 output used to be named ``*.tiff.tiff``."""
+    if _skip_without_ffmpeg():
+        return
+    import glob as _glob
+    inp1, inp2, out, rec = tmp_path / "in1", tmp_path / "in2", tmp_path / "out", tmp_path / "rec"
+    for d in (inp1, inp2, out, rec):
+        d.mkdir()
+    _write_test_stack(inp1 / "planeA.tif", seed=1)
+    _write_test_stack(inp2 / "planeB.tif", seed=2)
+
+    z = SPARZIP(path_image_files1=str(inp1 / "*.tif"), path_image_files2=str(inp2 / "*.tif"),
+                stem="s", output_path=str(out) + "/", num_workers=1)
+    z.run(codec="x265", compression_level=0)
+
+    u = UNSPARZ(path_sparse_bp1=str(out / "planeA.npz"), path_encoded_bp1=str(out / "planeA_*.mp4"),
+                path_sparse_bp2=str(out / "planeB.npz"), path_encoded_bp2=str(out / "planeB_*.mp4"),
+                stem="r", output_path=str(rec) + "/", streaming=False)
+    u.run()
+    names = sorted(os.path.basename(p) for p in _glob.glob(str(rec / "*")))
+    assert names == ["r_planeA_compression_level_0.tiff", "r_planeB_compression_level_0.tiff"]
+
+
+def test_get_default_stem_never_returns_a_dotfile_name():
+    from cli import get_default_stem
+    assert get_default_stem("output/*.mp4") == "output"
+    assert get_default_stem("data/*.tiff") == "output"
+    assert get_default_stem("*") == "output"
+    assert get_default_stem("data/experiment_*.tiff") == "experiment_"
+    assert get_default_stem("data/stack.tiff") == "stack"
+
+
+def test_nonmkv_metadata_is_read_from_given_npz_paths(tmp_path):
+    """Metadata lookup used to glob the reconstruction output folder for NPZs."""
+    if _skip_without_ffmpeg():
+        return
+    inp, out, rec = tmp_path / "in", tmp_path / "out", tmp_path / "rec"
+    for d in (inp, out, rec):
+        d.mkdir()
+    _write_test_stack(inp / "stackA.tif")
+
+    z = SPARZIP(path_image_files1=str(inp / "*.tif"), stem="s", output_path=str(out) + "/",
+                extract_metadata=True, num_workers=1)
+    z.run(codec="x265", compression_level=0)
+
+    u = UNSPARZ(path_sparse_bp1=str(out / "*.npz"), path_encoded_bp1=str(out / "*.mp4"),
+                stem="r", output_path=str(rec) + "/")
+    metadata_bp1, _ = u.load_original_metadata()
+    assert len(metadata_bp1) == 1
+    assert "tags" in metadata_bp1[0]
+
+
+def test_ffv1_metadata_goes_to_json_found_next_to_videos(tmp_path):
+    """ffv1 writes no NPZ, so metadata used to be dropped unless JSON was requested."""
+    if _skip_without_ffmpeg():
+        return
+    inp, out, rec = tmp_path / "in", tmp_path / "out", tmp_path / "rec"
+    for d in (inp, out, rec):
+        d.mkdir()
+    _write_test_stack(inp / "stackA.tif")
+
+    z = SPARZIP(path_image_files1=str(inp / "*.tif"), stem="s", output_path=str(out) + "/",
+                extract_metadata=True, num_workers=1)
+    z.run(codec="ffv1", compression_level=0)
+    assert (out / "s_metadata_bp1.json").exists()
+
+    u = UNSPARZ(path_sparse_bp1=None, path_encoded_bp1=str(out / "*.avi"), use_roi=False,
+                stem="r", output_path=str(rec) + "/")
+    metadata_bp1, _ = u.load_original_metadata()
+    assert "tags" in metadata_bp1[0]
+
+
+def test_zstd_run_writes_metadata_json(tmp_path):
+    inp, out = tmp_path / "in", tmp_path / "out"
+    for d in (inp, out):
+        d.mkdir()
+    _write_test_stack(inp / "stackA.tif")
+
+    z = SPARZIP(path_image_files1=str(inp / "*.tif"), stem="s", output_path=str(out) + "/",
+                extract_metadata=True, num_workers=1)
+    z.run(codec="zstd", compression_level=3)
+    with open(out / "s_metadata_bp1.json") as f:
+        saved = json.load(f)
+    assert "tags" in saved[0]
+
+
+def test_median_patch_keeps_exact_peaks_in_npz_and_patches_video_only():
+    frame = np.zeros((1, 5, 5), dtype=np.uint16)
+    frame[0, 2, 2] = 100
+
+    obj = _make_sparzip_for_process_images([frame], peak_process="median")
+    processed, _ = obj.process_images()
+
+    # NPZ values come from the original stack
+    roi = processed[0].compute().todense()
+    assert roi[0, 2, 2] == 100
+    # the video stack is median-patched, the original is untouched
+    assert obj.video_bp1[0].compute()[0, 2, 2] == 0
+    assert obj.bp1[0].compute()[0, 2, 2] == 100
+
+
+def _make_sparzip_for_encode(tmp_path, npz_written):
+    obj = SPARZIP.__new__(SPARZIP)
+    original = da.from_array(np.full((3, 32, 32), 7, dtype=np.uint16), chunks=(1, 32, 32))
+    patched = da.from_array(np.full((3, 32, 32), 9, dtype=np.uint16), chunks=(1, 32, 32))
+    obj.bp1, obj.bp2 = [original], None
+    obj.video_bp1, obj.video_bp2 = [patched], None
+    obj.processed_bp1 = [object()]
+    obj.path_image_files1 = [str(tmp_path / "stackA.tif")]
+    obj.output_path = str(tmp_path) + "/"
+    obj.single_plane = True
+    obj.num_workers = 1
+    obj.extract_metadata_flag = False
+    obj._npz_written = npz_written
+    calls = []
+    obj.write_frames_to_video = lambda block, name, args: calls.append((block, name))
+    return obj, calls
+
+
+def test_encode_passes_lazy_stack_and_uses_patched_video_only_with_npz(tmp_path):
+    obj, calls = _make_sparzip_for_encode(tmp_path, npz_written=True)
+    obj.encode(codec="x265", compression_lvl=0)
+    block, name = calls[0]
+    # the dask stack is passed through, so write_frames_to_video streams it in chunks
+    assert isinstance(block, da.Array)
+    assert int(block[0, 0, 0].compute()) == 9
+    assert name.endswith("stackA_compression_level_0.mp4")
+
+    obj, calls = _make_sparzip_for_encode(tmp_path, npz_written=False)
+    obj.encode(codec="x265", compression_lvl=0)
+    # without an NPZ to restore the peaks, the original stack is encoded
+    assert int(calls[0][0][0, 0, 0].compute()) == 7
+
+
+def test_add_kernel_handles_k1_and_even_kernels():
+    obj = SPARZIP.__new__(SPARZIP)
+    mask = np.zeros((6, 6))
+    mask[2, 3] = 1
+
+    out1 = obj.add_kernel(mask, 1)
+    assert out1.shape == mask.shape
+    np.testing.assert_array_equal(out1, mask)
+
+    out3 = obj.add_kernel(mask, 3)
+    assert out3.sum() == 9 and out3[1:4, 2:5].all()
+
+    out4 = obj.add_kernel(mask, 4)
+    assert out4.shape == mask.shape
+    assert out4.sum() == 16 and out4[0:4, 1:5].all()
+
+
+def test_output_basename_suffixes_only_colliding_planes():
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.path_image_files1 = ["/a/img.tif", "/a/only1.tif"]
+    obj.path_image_files2 = ["/b/img.tif", "/b/only2.tif"]
+    assert obj._output_basename(1, 0) == "img_bp1"
+    assert obj._output_basename(2, 0) == "img_bp2"
+    assert obj._output_basename(1, 1) == "only1"
+    assert obj._output_basename(2, 1) == "only2"
+
+    single = SPARZIP.__new__(SPARZIP)
+    single.path_image_files1 = ["/a/img.tif"]
+    assert single._output_basename(1, 0) == "img"
+
+
+def test_compression_stats_count_bp2_and_zst_outputs(tmp_path, capsys):
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.output_path = str(tmp_path) + "/"
+    obj.create_single_file = False
+    obj.bp1 = [da.zeros((10, 10, 10), dtype=np.uint16)]  # 2000 bytes
+    obj.bp2 = [da.zeros((10, 10, 10), dtype=np.uint16)]  # 2000 bytes
+    (tmp_path / "planeA_level_3.zst").write_bytes(b"x" * 500)
+    (tmp_path / "planeB_level_3.zst").write_bytes(b"x" * 500)
+
+    obj._print_compression_stats()
+    printed = capsys.readouterr().out
+    assert "Zstd files" in printed
+    assert "Compression ratio: 4.0x" in printed
+
+
+def test_package_to_mkv_user_codec_uses_custom_extension(tmp_path, monkeypatch):
+    import subprocess
+
+    video_path = tmp_path / "movieA_compression_level_0.mkv"
+    video_path.write_bytes(b"video-bytes")
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.output_path = str(tmp_path) + os.sep
+    obj.path_image_files1 = [str(tmp_path / "movieA.tiff")]
+    obj.processed_bp1 = [object()]
+    obj.single_plane = True
+    obj.extract_metadata_flag = False
+    obj.save_metadata_to_json = False
+    obj.validate_video_file = lambda _path: None
+
+    seen = []
+
+    class _Result:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(cmd, capture_output=True, text=True, timeout=None):
+        seen.append(cmd)
+        with open(cmd[-1], "wb") as f:
+            f.write(b"mkv")
+        return _Result()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+    obj.package_to_mkv("user", 0, custom_file_extension="mkv")
+    assert seen and str(video_path) in seen[0]
+
+
+def test_avi_and_mov_globs_are_not_treated_as_mkv(tmp_path):
+    (tmp_path / "a_compression_level_0.avi").write_bytes(b"")
+    (tmp_path / "b_compression_level_0.mov").write_bytes(b"")
+    assert not UNSPARZ._looks_like_mkv_input(str(tmp_path / "*.avi"))
+    assert not UNSPARZ._looks_like_mkv_input(str(tmp_path / "*.mov"))
+    (tmp_path / "c_compression_level_0.mkv").write_bytes(b"")
+    assert UNSPARZ._looks_like_mkv_input(str(tmp_path / "*.mp4"))
+    assert UNSPARZ._looks_like_mkv_input(str(tmp_path / "*.mkv"))
+
+
+def test_multichannel_tiff_input_raises_clear_error(tmp_path):
+    import tifffile
+    tifffile.imwrite(str(tmp_path / "rgb.tif"), np.zeros((4, 16, 16), dtype=np.uint16),
+                     photometric="rgb", planarconfig="separate")
+    try:
+        SPARZIP(path_image_files1=str(tmp_path / "*.tif"), stem="s",
+                output_path=str(tmp_path) + "/", num_workers=1)
+    except ValueError as e:
+        assert "samples per pixel" in str(e)
+    else:
+        raise AssertionError("multi-channel TIFF was accepted")
+
+
+def test_description_survives_and_output_is_one_series(tmp_path):
+    """tifffile's own shape JSON used to replace the user's ImageDescription,
+    and per-page writes split the output into one series per page."""
+    if _skip_without_ffmpeg():
+        return
+    import tifffile
+    for streaming in (True, False):
+        inp, out, rec = (tmp_path / f"{n}_{streaming}" for n in ("in", "out", "rec"))
+        for d in (inp, out, rec):
+            d.mkdir()
+        original = np.random.default_rng(0).integers(100, 300, size=(6, 32, 32), dtype=np.uint16)
+        tifffile.imwrite(str(inp / "s.tif"), original, description="my-desc", photometric="minisblack")
+
+        z = SPARZIP(path_image_files1=str(inp / "*.tif"), stem="s", output_path=str(out) + "/",
+                    extract_metadata=True, save_residuals=True, num_workers=1)
+        z.run(codec="x265", compression_level=0)
+        u = UNSPARZ(path_sparse_bp1=str(out / "*.npz"), path_encoded_bp1=str(out / "*.mp4"),
+                    stem="r", output_path=str(rec) + "/", streaming=streaming)
+        u.run()
+
+        output = next(rec.glob("*.tiff"))
+        with tifffile.TiffFile(str(output)) as tf:
+            assert len(tf.series) == 1
+            assert tf.pages[0].description == "my-desc"
+        np.testing.assert_array_equal(tifffile.imread(str(output)), original)
 
 
 if __name__ == "__main__":

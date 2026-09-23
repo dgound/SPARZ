@@ -12,7 +12,6 @@ import dask.array as da
 import dask_image.imread
 from dask import delayed
 import dask
-from dask import compute
 import gc
 from tqdm import tqdm
 import os
@@ -1083,6 +1082,22 @@ class SPARZIP:
         img_nums = len(raw_data) // (dimX * dimY)
         return np.reshape(raw_data, (img_nums, dimY, dimX))
 
+    @staticmethod
+    def _check_grayscale_tiff(path):
+        """Raise a clear error for multi-channel TIFFs, which SPARZ cannot compress.
+
+        Older tifffile versions store a (3 or 4, H, W) array as one RGB page with
+        separate planes, so a short grayscale stack saved that way also lands here.
+        """
+        with TiffFile(path) as tif:
+            samples = tif.pages[0].samplesperpixel
+        if samples > 1:
+            raise ValueError(
+                f"{path} has {samples} samples per pixel; SPARZ expects single-channel "
+                f"(grayscale) TIFFs. If this is a stack of {samples} frames, re-save it "
+                "with tifffile.imwrite(..., photometric='minisblack')."
+            )
+
     def load_images(self, path_image_files1:str, path_image_files2:str):
         print ('Lazily loading images...')
         # files1 = sorted(glob.glob(path_image_files1))
@@ -1094,6 +1109,7 @@ class SPARZIP:
         if not ext:
             raise ValueError(f"No extension found for file {files1[0]}")
         if ext == '.tiff' or ext == '.tif':
+            self._check_grayscale_tiff(files1[0])
             with TiffFile(files1[0]) as tif:
                 multipage = len(tif.pages) > 1
             if multipage:
@@ -1133,6 +1149,7 @@ class SPARZIP:
         if not ext:
             raise ValueError(f"No extension found for file {files2[0]}")
         if ext == '.tiff' or ext == '.tif':
+            self._check_grayscale_tiff(files2[0])
             if multipage:
                 p2 = [dask_image.imread.imread(f) for f in files2]
             else:
@@ -1205,7 +1222,11 @@ class SPARZIP:
 
         kernel = np.ones((kernel_size, kernel_size))
 
-        pad_size = kernel.shape[0]//2
+        # Window is [i - k//2, i - k//2 + k): centred for odd k, one pixel
+        # short on the high side for even k. Pad by the full kernel size so
+        # the slice back out is never empty (k=1 would give [0:-0]).
+        half_k = kernel_size // 2
+        pad_size = kernel_size
         arr = np.pad(image, pad_size, mode='constant')
 
         # Find the indices of the ones in the input array
@@ -1216,10 +1237,10 @@ class SPARZIP:
 
         # Loop through the indices of the ones and center the kernel on each one
         for i, j in ones_indices:
-            start_i = i - kernel.shape[0]//2
-            end_i = i + kernel.shape[0]//2 + 1
-            start_j = j - kernel.shape[1]//2
-            end_j = j + kernel.shape[1]//2 + 1
+            start_i = i - half_k
+            end_i = start_i + kernel_size
+            start_j = j - half_k
+            end_j = start_j + kernel_size
 
             # Center the kernel on the current one
             new_arr[start_i:end_i, start_j:end_j] = kernel
@@ -1291,11 +1312,12 @@ class SPARZIP:
             frame = block[i]
             peaks = self.find_peaks(frame, self.kernel_size, min_distance=1)
             for (r, c) in peaks:
+                # Same window as add_kernel, so the patch stays inside the ROI
                 half_k = self.kernel_size // 2
                 r_start = max(r - half_k, 0)
-                r_end = min(r + half_k + 1, frame.shape[0])
+                r_end = min(r - half_k + self.kernel_size, frame.shape[0])
                 c_start = max(c - half_k, 0)
-                c_end = min(c + half_k + 1, frame.shape[1])
+                c_end = min(c - half_k + self.kernel_size, frame.shape[1])
                 median_val = np.median(frame[r_start:r_end, c_start:c_end])
                 new_block[i, r_start:r_end, c_start:c_end] = median_val
         return new_block
@@ -1386,11 +1408,15 @@ class SPARZIP:
     def process_images(self):
         print('Processing images...')
 
+        # The median patch only feeds the video encoder. Peaks, ROI values and
+        # residuals keep using the original stacks, so the NPZ restores the
+        # exact peak intensities over the patched background.
+        self.video_bp1, self.video_bp2 = self.bp1, self.bp2
         if self.peak_process == 'median':
             print('Applying median patch...')
-            self.bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
+            self.video_bp1 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp1]
             if not self.single_plane:
-                self.bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
+                self.video_bp2 = [block.map_blocks(self.median_patch, dtype=block.dtype) for block in self.bp2]
 
         # Step 1: Find peaks in plane 1
         map1 = [blck.map_blocks(lambda x: self.find_peaks(x[0,:,:], self.kernel_size, min_distance=1), dtype='int16') for blck in self.bp1]
@@ -1469,6 +1495,10 @@ class SPARZIP:
                             for tag in first_page.tags:
                                 try:
                                     if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                        # Keep the first of duplicate tags: tifffile writes its own shape
+                                        # JSON as a second ImageDescription after the user's description.
+                                        if tag.name in metadata['tags']:
+                                            continue
                                         # Store commonly used tags
                                         if tag.name in ['ImageDescription', 'Software', 'DateTime', 
                                                        'XResolution', 'YResolution', 'ResolutionUnit']:
@@ -1489,6 +1519,10 @@ class SPARZIP:
                                 for tag in page.tags:
                                     try:
                                         if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                            # Keep the first of duplicate tags: tifffile writes its own shape
+                                            # JSON as a second ImageDescription after the user's description.
+                                            if tag.name in ifd_tags:
+                                                continue
                                             # Store all tags for individual IFDs
                                             if isinstance(tag.value, (str, int, float, bool)):
                                                 ifd_tags[tag.name] = tag.value
@@ -1575,6 +1609,10 @@ class SPARZIP:
                                 for tag in first_page.tags:
                                     try:
                                         if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                            # Keep the first of duplicate tags: tifffile writes its own shape
+                                            # JSON as a second ImageDescription after the user's description.
+                                            if tag.name in metadata['tags']:
+                                                continue
                                             if tag.name in ['ImageDescription', 'Software', 'DateTime', 
                                                            'XResolution', 'YResolution', 'ResolutionUnit']:
                                                 if isinstance(tag.value, (str, int, float, bool)):
@@ -1594,6 +1632,10 @@ class SPARZIP:
                                     for tag in page.tags:
                                         try:
                                             if hasattr(tag, 'name') and hasattr(tag, 'value'):
+                                                # Keep the first of duplicate tags: tifffile writes its own shape
+                                                # JSON as a second ImageDescription after the user's description.
+                                                if tag.name in ifd_tags:
+                                                    continue
                                                 # Store all tags for individual IFDs
                                                 if isinstance(tag.value, (str, int, float, bool)):
                                                     ifd_tags[tag.name] = tag.value
@@ -1750,6 +1792,24 @@ class SPARZIP:
         # joblib.dump(mat, path, compress=('lzma', 9))
 
 
+    def _output_basename(self, plane: int, index: int) -> str:
+        """Output file stem for input ``index`` of ``plane`` (1 or 2).
+
+        Uses the input file's basename. In biplane mode, a basename present in
+        both planes gets a ``_bp1``/``_bp2`` suffix so the two planes' outputs
+        do not overwrite each other.
+        """
+        def _base(path):
+            return os.path.splitext(os.path.split(os.path.normpath(path))[1])[0]
+
+        paths = self.path_image_files1 if plane == 1 else self.path_image_files2
+        name = _base(paths[index])
+        if getattr(self, 'path_image_files2', None):
+            other = self.path_image_files2 if plane == 1 else self.path_image_files1
+            if name in {_base(p) for p in other}:
+                name = f'{name}_bp{plane}'
+        return name
+
     def deflate(self):
         print('Deflating images...')
         show_progress_bar = False
@@ -1763,7 +1823,7 @@ class SPARZIP:
             saves = []
             for i in range(len(self.processed_bp1)):
                 # Directly append delayed save_npz operations to the list
-                flnm1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[i]))[1])[0]
+                flnm1 = self._output_basename(1, i)
                 
                 # Get metadata for this file
                 metadata_bp1_entry = self.metadata_bp1[i] if hasattr(self, 'metadata_bp1') and self.metadata_bp1 and i < len(self.metadata_bp1) else None
@@ -1772,7 +1832,7 @@ class SPARZIP:
                 saves.append(delayed(self.save_npz_with_metadata)(self.output_path+flnm1+'.npz', self.processed_bp1[i], metadata_bp1_entry))
                 
                 if self.single_plane == False:
-                    flnm2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[i]))[1])[0]
+                    flnm2 = self._output_basename(2, i)
                     
                     # Get metadata for BP2 file
                     metadata_bp2_entry = self.metadata_bp2[i] if hasattr(self, 'metadata_bp2') and self.metadata_bp2 and i < len(self.metadata_bp2) else None
@@ -1789,6 +1849,7 @@ class SPARZIP:
                     progress_bar.update(self.batch_size)
             if show_progress_bar:
                 progress_bar.close()
+        self._npz_written = True
         
         # Save metadata for lossless restoration
         self.save_metadata()
@@ -1973,10 +2034,17 @@ class SPARZIP:
             show_progress_bar = True
         except NameError:
             show_progress_bar = False
-        # Process videos using delayed
+        # The median-patched stacks are only safe to encode when the NPZ that
+        # restores the peak neighbourhoods was actually written.
+        if getattr(self, '_npz_written', False):
+            video_bp1 = getattr(self, 'video_bp1', self.bp1)
+            video_bp2 = getattr(self, 'video_bp2', self.bp2)
+        else:
+            video_bp1, video_bp2 = self.bp1, self.bp2
+
         writes = []
         for k in range(len(self.processed_bp1)):
-            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            input_file_name1 = self._output_basename(1, k)
 
             if codec =='prores':
                 video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_lvl}.mov'
@@ -1993,15 +2061,9 @@ class SPARZIP:
             else:
                 writer_args = custom_dict
 
-            if self.single_plane:
-                writes.append(delayed(self.write_frames_to_video)(
-                    self.bp1[k], video_name1, writer_args
-                ))
-            else:
-                writes.append(delayed(self.write_frames_to_video)(
-                    self.bp1[k], video_name1, writer_args
-                ))
-                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+            writes.append((video_bp1[k], video_name1, writer_args))
+            if not self.single_plane:
+                input_file_name2 = self._output_basename(2, k)
                 
                 if codec=='prores':
                     video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mov'
@@ -2012,20 +2074,20 @@ class SPARZIP:
                 else:
                     video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_lvl}.mp4'
                 # video_name2 = f'{self.output_path}{self.stem}_bp2_compression_level_{compression_lvl}_part_{k}.mp4'
-                writes.append(delayed(self.write_frames_to_video)(
-                    self.bp2[k], video_name2, writer_args
-                ))
+                writes.append((video_bp2[k], video_name2, writer_args))
 
-        # Execute the delayed writes sequentially (one file at a time)
-        # FFmpeg is not optimized for parallel encoding - sequential reduces memory and CPU contention
+        # Encode sequentially (one file at a time)
+        # FFmpeg is not optimized for parallel encoding - sequential reduces memory and CPU contention.
+        # The dask stack is passed as-is so write_frames_to_video computes it chunk by chunk.
         print(f'Encoding {len(writes)} video file(s) sequentially...')
-        for i, write_task in enumerate(writes):
+        for i, (block, video_name, args) in enumerate(writes):
             print(f'  Encoding file {i+1}/{len(writes)}...')
-            if show_progress_bar:
-                with ProgressBar():
-                    compute(write_task, scheduler='threads', num_workers=self.num_workers)
-            else:
-                compute(write_task, scheduler='threads', num_workers=self.num_workers)
+            with dask.config.set(scheduler='threads', num_workers=self.num_workers):
+                if show_progress_bar:
+                    with ProgressBar():
+                        self.write_frames_to_video(block, video_name, args)
+                else:
+                    self.write_frames_to_video(block, video_name, args)
             gc.collect()
 
         # Save metadata for lossless restoration
@@ -2287,7 +2349,7 @@ class SPARZIP:
         print(f'Compressing with zstd level {compression_level} (delta={use_delta}, shuffle={use_shuffle})...')
 
         for k in range(len(self.bp1)):
-            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            input_file_name1 = self._output_basename(1, k)
 
             # Dictionary training if requested
             bp1_dict = None
@@ -2312,7 +2374,7 @@ class SPARZIP:
 
             # Compress BP2 if biplane
             if not self.single_plane:
-                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                input_file_name2 = self._output_basename(2, k)
                 output_file2 = f'{self.output_path}{input_file_name2}_level_{compression_level}.zst'
                 self._zstd_compress_array(self.bp2[k], output_file2, compression_level,
                                           bp2_dict, use_delta, use_shuffle)
@@ -2701,13 +2763,13 @@ class SPARZIP:
         print(f"Computing {mode} residuals from re-decoded videos (chunk_size={self.residual_chunk_size})...")
 
         for k in range(len(self.bp1)):
-            in1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            in1 = self._output_basename(1, k)
             video1 = self.get_encoded_video_path(in1, compression_level, codec, custom_file_extension)
             self._save_one_residual(video1, k, plane="bp1", mode=mode,
                                     codec=codec, compression_level=compression_level,
                                     input_stem=in1)
             if not self.single_plane:
-                in2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                in2 = self._output_basename(2, k)
                 video2 = self.get_encoded_video_path(in2, compression_level, codec, custom_file_extension)
                 self._save_one_residual(video2, k, plane="bp2", mode=mode,
                                         codec=codec, compression_level=compression_level,
@@ -2873,6 +2935,10 @@ class SPARZIP:
 
         self._write_metadata_json_files()
 
+    def _metadata_needs_json(self):
+        """True when metadata must live in JSON because no NPZ carries it."""
+        return self.save_metadata_to_json or not getattr(self, '_npz_written', False)
+
     def _dataset_metadata_json_paths(self):
         """Return dataset-level metadata JSON paths generated by save_metadata()."""
         paths = [os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')]
@@ -2941,6 +3007,7 @@ class SPARZIP:
                       glob.glob(f'{self.output_path}*.avi') +
                       glob.glob(f'{self.output_path}*.mov'))
         residual_files = glob.glob(f'{self.output_path}*{RESIDUAL_SUFFIX}')
+        zst_files = [f for f in glob.glob(f'{self.output_path}*.zst') if not f.endswith(RESIDUAL_SUFFIX)]
         mkv_files = glob.glob(f'{self.output_path}*.mkv')
 
         def _size(files):
@@ -2950,16 +3017,17 @@ class SPARZIP:
         video_size = _size(video_files)
         residual_size = _size(residual_files)
         mkv_size = _size(mkv_files)
+        zst_size = _size(zst_files)
 
         if self.create_single_file and mkv_size > 0:
             total_size = mkv_size
         else:
-            total_size = video_size + npz_size + residual_size
+            total_size = video_size + npz_size + residual_size + zst_size
 
         # Estimate original size from dask arrays
         original_size = 0
         try:
-            for arr in self.bp1:
+            for arr in list(self.bp1) + list(self.bp2 or []):
                 if hasattr(arr, 'nbytes'):
                     original_size += arr.nbytes
                 elif hasattr(arr, 'dtype') and hasattr(arr, 'shape'):
@@ -2974,6 +3042,8 @@ class SPARZIP:
             print(f"  NPZ files:      {npz_size / 1e6:.1f} MB ({len(npz_files)} files)")
         if residual_size > 0:
             print(f"  Residual files: {residual_size / 1e6:.1f} MB ({len(residual_files)} files)")
+        if zst_size > 0:
+            print(f"  Zstd files:     {zst_size / 1e6:.1f} MB ({len(zst_files)} files)")
         if mkv_size > 0:
             print(f"  MKV files:      {mkv_size / 1e6:.1f} MB ({len(mkv_files)} files)")
         print(f"  Total:          {total_size / 1e6:.1f} MB")
@@ -2994,6 +3064,7 @@ class SPARZIP:
         # Determine if codec is truly lossless (no data loss)
         # ffv1 with gray16le preserves all 16 bits, so sparse matrix is redundant
         is_truly_lossless = (codec == 'ffv1')
+        self._npz_written = False
 
         if self.find_roi and not is_truly_lossless:
             self.deflate()
@@ -3009,18 +3080,23 @@ class SPARZIP:
         else:
             raise ValueError(f'Unsupported codec: {codec}.')
 
+        # Without an NPZ (zstd, ffv1, or ROI off) there is nowhere to embed the
+        # metadata, so write the dataset JSON instead.
+        if self.extract_metadata_flag and not self.save_metadata_to_json and not self._npz_written:
+            self._write_metadata_json_files()
+
         # Optional exact-reconstruction residual sidecars for video codecs
         if self.save_residuals and codec in ('x265', 'av1', 'x264', 'prores', 'ffv1', 'zstd', 'user'):
             self._save_residuals_for_run(codec, compression_level, custom_file_extension=custom_file_extension)
 
         # Create single MKV file if requested
         if self.create_single_file:
-            self.package_to_mkv(codec, compression_level)
+            self.package_to_mkv(codec, compression_level, custom_file_extension=custom_file_extension)
 
         # Print compression statistics
         self._print_compression_stats()
 
-    def package_to_mkv(self, codec, compression_level):
+    def package_to_mkv(self, codec, compression_level, custom_file_extension=None):
         """
         Package the video file and NPZ files into a single MKV container.
         Uses ffmpeg-python to create an MKV file with the video as the main track
@@ -3038,6 +3114,8 @@ class SPARZIP:
             video_ext = 'mov'
         elif codec == 'ffv1':
             video_ext = 'avi'
+        elif codec == 'user' and custom_file_extension:
+            video_ext = custom_file_extension
         else:
             video_ext = 'mp4'  # Default for x265, av1, x264, etc.
         
@@ -3045,7 +3123,7 @@ class SPARZIP:
         video_entries = []
         
         for k in range(len(self.processed_bp1)):
-            input_file_name1 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files1[k]))[1])[0]
+            input_file_name1 = self._output_basename(1, k)
             video_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.{video_ext}'
             mkv_name1 = f'{self.output_path}{input_file_name1}_compression_level_{compression_level}.mkv'
             
@@ -3066,7 +3144,7 @@ class SPARZIP:
             
             # Handle BP2 if not single plane
             if not self.single_plane:
-                input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_image_files2[k]))[1])[0]
+                input_file_name2 = self._output_basename(2, k)
                 video_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.{video_ext}'
                 mkv_name2 = f'{self.output_path}{input_file_name2}_compression_level_{compression_level}.mkv'
                 
@@ -3103,7 +3181,7 @@ class SPARZIP:
                 # Per-video sidecar selection: only attach files matching this stem
                 sidecars = self.find_matching_sidecars_for_video(video_file)
                 attachments = [p for p in (sidecars.get('npz'), sidecars.get('residual')) if p]
-                if self.extract_metadata_flag and (codec == 'ffv1' or self.save_metadata_to_json):
+                if self.extract_metadata_flag and self._metadata_needs_json():
                     video_stem = os.path.splitext(os.path.basename(video_file))[0]
                     metadata_path = self._write_mkv_metadata_sidecar(
                         video_stem, entry['plane'], entry['index']
@@ -3191,7 +3269,7 @@ class SPARZIP:
             print(f'\nWARNING: {failed_count} MKV file(s) could not be created.')
             print('  Check the error messages above for details.')
             print('  The original video and NPZ files are still available.')
-        elif successful_count > 0 and self.extract_metadata_flag and self.save_metadata_to_json:
+        elif successful_count > 0 and self.extract_metadata_flag and self._metadata_needs_json():
             cleanup_errors = []
             for metadata_path in self._dataset_metadata_json_paths():
                 if not metadata_path or not os.path.exists(metadata_path):
@@ -3242,6 +3320,9 @@ class UNSPARZ:
             self._codec_bp2 = None
             self.path_metadata_bp1 = None
             self.path_metadata_bp2 = None
+            # extract_from_mkv only wires bp2 when a bp2 MKV group exists.
+            self.path_sparse_bp1 = None
+            self.path_sparse_bp2 = None
             if self._looks_like_mkv_input(path_encoded_bp1):
                 mkv_files = self._resolve_mkv_files(path_encoded_bp1)
                 if not mkv_files:
@@ -3259,6 +3340,8 @@ class UNSPARZ:
                 self._validate_mkv_sidecars()
             else:
                 # Traditional separate files
+                self.path_sparse_bp1 = path_sparse_bp1
+                self.path_sparse_bp2 = path_sparse_bp2
                 self.path_encoded_bp1 = sorted(glob.glob(path_encoded_bp1))
                 self.path_encoded_bp2 = sorted(glob.glob(path_encoded_bp2)) if path_encoded_bp2 is not None else None
                 # Catch obvious user mistakes in the non-MKV path too.
@@ -3360,9 +3443,13 @@ class UNSPARZ:
         attachment_count = 0
         npz_extracted = 0
         residual_extracted = 0
+        # Position among attachment streams, used by -dump_attachment:t:N. It must
+        # advance for every attachment, not only for successful extractions.
+        attachment_index = -1
         for stream in probe.get('streams', []):
             if stream.get('codec_type') != 'attachment':
                 continue
+            attachment_index += 1
             stream_index = stream['index']
             attachment_filename = stream.get('tags', {}).get('filename',
                                                              f'attachment_{attachment_count}.bin')
@@ -3382,11 +3469,13 @@ class UNSPARZ:
                 continue
 
             cmd = [
-                'ffmpeg', '-dump_attachment:t:{}'.format(attachment_count), attachment_path,
+                'ffmpeg', '-dump_attachment:t:{}'.format(attachment_index), attachment_path,
                 '-i', mkv_file
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            success = result.returncode == 0 and os.path.exists(attachment_path)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            # ffmpeg exits non-zero here even when the dump worked ("At least one
+            # output file must be specified"), so judge by the written file.
+            success = os.path.exists(attachment_path) and os.path.getsize(attachment_path) > 0
             if not success:
                 cmd2 = [
                     'ffmpeg', '-y', '-i', mkv_file,
@@ -3396,16 +3485,9 @@ class UNSPARZ:
                 result2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=10)
                 success = result2.returncode == 0 and os.path.exists(attachment_path)
                 if not success:
-                    cmd3 = [
-                        'ffmpeg', '-i', mkv_file,
-                        '-dump_attachment:t', attachment_path
-                    ]
-                    result3 = subprocess.run(cmd3, capture_output=True, text=True, timeout=10)
-                    success = result3.returncode == 0 and os.path.exists(attachment_path)
-                    if not success:
-                        print(f'Failed to extract {attachment_filename}')
-                        if result2.stderr:
-                            print(f'Error: {result2.stderr[:200]}')
+                    print(f'Failed to extract {attachment_filename}')
+                    if result2.stderr:
+                        print(f'Error: {result2.stderr[:200]}')
 
             if success:
                 print(f'Extracted {kind}: {attachment_filename}')
@@ -3546,6 +3628,9 @@ class UNSPARZ:
         if '.mkv' in s:
             return bool(glob.glob(s))
         # ``*.mp4`` glob may be present alongside MKV-packaged versions.
+        # Other patterns (``*.avi``, ``*.mov``) are plain videos, not MKV.
+        if '.mp4' not in s:
+            return False
         alt = s.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv')
         return bool(glob.glob(alt))
 
@@ -3559,6 +3644,8 @@ class UNSPARZ:
         s = str(path_or_glob)
         if '.mkv' in s:
             return sorted(glob.glob(s))
+        if '.mp4' not in s:
+            return []
         alt = s.replace('.mp4', '.mkv').replace('*.mp4', '*.mkv')
         return sorted(glob.glob(alt))
 
@@ -3774,6 +3861,13 @@ class UNSPARZ:
                         print(f'Cleaned up temporary directory: {temp_dir}')
                 except Exception as e:
                     print(f'Warning: Failed to cleanup temporary directory {temp_dir}: {e}')
+                # Drop the shared mkv_temp/ parent once nothing else is left in it
+                temp_root = os.path.dirname(temp_dir)
+                if os.path.basename(temp_root) == 'mkv_temp':
+                    try:
+                        os.rmdir(temp_root)
+                    except OSError:
+                        pass  # not empty (another extraction) or already gone
             self.temp_dirs_to_cleanup = []
 
     def load_metadata_from_npz(self, npz_file_path):
@@ -3863,8 +3957,15 @@ class UNSPARZ:
         print('Loading metadata...')
         
         # --- Try loading from JSON files first ---
-        metadata_file_bp1 = os.path.join(self.output_path, f'{self.stem}_metadata_bp1.json')
-        metadata_file_bp2 = os.path.join(self.output_path, f'{self.stem}_metadata_bp2.json')
+        # SPARZIP writes the dataset JSON next to the compressed videos, so look
+        # there when the reconstruction output folder has none.
+        json_dir = self.output_path
+        video_dir = os.path.dirname(self.path_encoded_bp1[0]) if self.path_encoded_bp1 else ''
+        if (video_dir and not glob.glob(os.path.join(json_dir, '*_metadata_bp1.json'))
+                and glob.glob(os.path.join(video_dir, '*_metadata_bp1.json'))):
+            json_dir = video_dir
+        metadata_file_bp1 = os.path.join(json_dir, f'{self.stem}_metadata_bp1.json')
+        metadata_file_bp2 = os.path.join(json_dir, f'{self.stem}_metadata_bp2.json')
 
         attached_metadata_bp1 = self._load_metadata_json_collection(
             getattr(self, 'path_metadata_bp1', None), 'BP1'
@@ -3881,7 +3982,7 @@ class UNSPARZ:
             print('Attempting to auto-detect metadata files...')
             
             # Look for any *_metadata_bp1.json files in the output directory
-            pattern_bp1 = os.path.join(self.output_path, '*_metadata_bp1.json')
+            pattern_bp1 = os.path.join(json_dir, '*_metadata_bp1.json')
             json_files_bp1 = glob.glob(pattern_bp1)
             
             if json_files_bp1:
@@ -3893,13 +3994,13 @@ class UNSPARZ:
                 
                 # Try to find corresponding BP2 file with same prefix
                 detected_stem = os.path.basename(metadata_file_bp1).replace('_metadata_bp1.json', '')
-                metadata_file_bp2 = os.path.join(self.output_path, f'{detected_stem}_metadata_bp2.json')
+                metadata_file_bp2 = os.path.join(json_dir, f'{detected_stem}_metadata_bp2.json')
                 
                 if os.path.exists(metadata_file_bp2):
                     print(f'Auto-detected BP2 metadata file: {metadata_file_bp2}')
                 else:
                     # Also try pattern matching for BP2
-                    pattern_bp2 = os.path.join(self.output_path, '*_metadata_bp2.json')
+                    pattern_bp2 = os.path.join(json_dir, '*_metadata_bp2.json')
                     json_files_bp2 = glob.glob(pattern_bp2)
                     if json_files_bp2:
                         metadata_file_bp2 = json_files_bp2[0]
@@ -4183,8 +4284,11 @@ class UNSPARZ:
                     elif 'tags' in file_metadata and 'ImageDescription' in file_metadata['tags']:
                         description = file_metadata['tags']['ImageDescription']
                     
+                    # metadata=None: no per-page shape JSON, so the pages read back
+                    # as one (T, H, W) series and the original description stays first
                     tif.write(frame_data, 
                              photometric='minisblack',
+                             metadata=None,
                              description=description,
                              resolution=resolution if resolution else None,
                              resolutionunit=resolution_unit if resolution_unit else None,
@@ -4193,6 +4297,7 @@ class UNSPARZ:
                     # Subsequent frames get individual metadata
                     tif.write(frame_data,
                              photometric='minisblack', 
+                             metadata=None,
                              extratags=frame_extratags if frame_extratags else None)
                 
                 if frame_idx % 500 == 0:  # Progress indicator
@@ -4286,11 +4391,11 @@ class UNSPARZ:
             
             # Now, write with description and extratags
             if resolution:
-                tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                tifffile.imwrite(filename, all_frames, photometric='minisblack', metadata=None,
                                bigtiff=use_bigtiff, description=description, extratags=extratags,
                                resolution=resolution, resolutionunit=resolution_unit)
             else:
-                tifffile.imwrite(filename, all_frames, photometric='minisblack', 
+                tifffile.imwrite(filename, all_frames, photometric='minisblack', metadata=None,
                                bigtiff=use_bigtiff, description=description, extratags=extratags)
                 # print(f"{debug_prefix}Fallback written to: {filename}")
 
@@ -5160,8 +5265,11 @@ class UNSPARZ:
                     frame = chunk[j]
                     if frame_idx == 0:
                         # Description, extratags, resolution all go on the first page.
+                        # metadata=None: no per-page shape JSON, so the pages read back
+                        # as one (T, H, W) series and the original description stays first
                         kwargs = {
                             'photometric': 'minisblack',
+                            'metadata': None,
                         }
                         if description:
                             kwargs['description'] = description
@@ -5183,7 +5291,7 @@ class UNSPARZ:
                         if requires_individual_writing:
                             # Per-frame extratags differ — cannot be contiguous;
                             # tifffile will emit a fresh IFD per page.
-                            kwargs = {'photometric': 'minisblack'}
+                            kwargs = {'photometric': 'minisblack', 'metadata': None}
                             per_frame_extras = _frame_extratags_individual(frame_idx)
                             if per_frame_extras:
                                 kwargs['extratags'] = per_frame_extras
@@ -5311,7 +5419,7 @@ class UNSPARZ:
 
                 if self.encoded_bp2 is not None:
                     input_file_name2 = os.path.splitext(os.path.split(os.path.normpath(self.path_encoded_bp2[k]))[1])[0]
-                    output_filename2 = f'{self.output_path}{self.stem}_{input_file_name2}.tiff'
+                    output_filename2 = f'{self.output_path}{self.stem}_{input_file_name2}'
                     # filename2 = f'{self.output_path}{self.stem}_bp2_part_{k}.tiff'
                     if self.output_format == 'tiff':
                         tiff_filename2 = f'{output_filename2}.tiff'
