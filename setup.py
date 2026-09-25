@@ -8,7 +8,7 @@ setup(
     version='0.5',
     description='Compress Single Molecule Localization Microscopy Data',
     long_description='Compression of Single Molecule Localization Microscopy Data using Sparse matrices and h265 video compression',
-    author='Dimos Gkountaroulis, Antonios Lioutas, Lian Jiang, and Laura Breimann',
+    author='Dimos Gkountaroulis, Laura Breimann, Antonios Lioutas and Lian Jiang',
     author_email='dimos.gkountaroulis@bcm.edu',
     url='https://github.com/your_username/your_package',
     package_dir={'': 'src'},
