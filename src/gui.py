@@ -26,10 +26,11 @@ class CompressWorker(QThread):
     def run(self):
         try:
             from SPARZ import SPARZIP
+            from cli import get_default_stem
 
             p = self.params
             os.makedirs(p['output_path'], exist_ok=True)
-            stem = Path(p['input_path'].replace('*', '').replace('?', '')).stem or 'output'
+            stem = get_default_stem(p['input_path'])
 
             z = SPARZIP(
                 path_image_files1=p['input_path'],
@@ -59,10 +60,11 @@ class DecompressWorker(QThread):
     def run(self):
         try:
             from SPARZ import UNSPARZ
+            from cli import get_default_stem
 
             p = self.params
             os.makedirs(p['output_path'], exist_ok=True)
-            stem = Path(p['video_path'].replace('*', '').replace('?', '')).stem or 'output'
+            stem = get_default_stem(p['video_path'])
 
             npz_path = p['npz_path']
             if npz_path is None and not p['no_roi']:
