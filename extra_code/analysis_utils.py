@@ -338,6 +338,69 @@ def calculate_ssim_biplane(original_folder, compressed_folder, bp_positive_patte
     
     return results
 
+import concurrent.futures
+from tqdm.auto import tqdm
+
+def _compute_single_file_ssim(args):
+    """Helper function to process a single file on a separate CPU core."""
+    orig_path, comp_path, dim_x, dim_y, fixed_data_range, step_size = args
+    try:
+        # Use memmap ('r' mode) to prevent RAM explosion when running 20 files at once
+        orig_data = np.memmap(orig_path, dtype=np.uint16, mode='r')
+        comp_data = np.memmap(comp_path, dtype=np.uint16, mode='r')
+        
+        frames = len(orig_data) // (dim_x * dim_y)
+        orig_frames = orig_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
+        comp_frames = comp_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
+        
+        file_ssim_scores = []
+        
+        # Step size allows checking every Nth frame (default is 1 = every frame)
+        for i in range(0, frames, step_size):
+            orig_img = orig_frames[i]
+            comp_img = comp_frames[i]
+            score = ssim(orig_img, comp_img, data_range=fixed_data_range)
+            file_ssim_scores.append(score)
+            
+        if file_ssim_scores:
+            return {
+                'original_file': os.path.basename(orig_path),
+                'compressed_file': os.path.basename(comp_path),
+                'ssim': np.median(file_ssim_scores) 
+            }
+    except Exception as e:
+        print(f"Error on {os.path.basename(orig_path)}: {e}")
+    return None
+
+def calculate_ssim_dat_folder(original_folder, decompressed_folder, fixed_data_range=23000, num_workers=10, step_size=1):
+    """
+    Parallelized SSIM calculation for .dat files.
+    """
+    dim_x, dim_y = get_dat_dimensions(original_folder)
+    
+    orig_files = natsorted([f for f in os.listdir(original_folder) if f.endswith('.dat')])
+    comp_files = natsorted([f for f in os.listdir(decompressed_folder) if f.endswith('.dat')])
+    
+    # Build a list of tasks for the CPU workers
+    tasks = []
+    for orig_file in orig_files:
+        if orig_file in comp_files:
+            orig_path = os.path.join(original_folder, orig_file)
+            comp_path = os.path.join(decompressed_folder, orig_file)
+            tasks.append((orig_path, comp_path, dim_x, dim_y, fixed_data_range, step_size))
+            
+    ssim_results = []
+    
+    # Run the tasks in parallel across all CPU cores!
+    print(f"  -> Distributing files across {num_workers} CPU cores...")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+        # Use tqdm to give you a real-time progress bar with time estimates
+        for result in tqdm(executor.map(_compute_single_file_ssim, tasks), total=len(tasks), desc="Calculating SSIM"):
+            if result is not None:
+                ssim_results.append(result)
+                
+    return ssim_results
+
 
 # ============================================================================
 # File and Data Utilities
@@ -405,57 +468,7 @@ def get_dat_dimensions(folder_path):
     except KeyError:
         raise ValueError("data.json does not contain the expected ['value']['Image']['DimX/DimY'] keys.")
 
-def calculate_ssim_dat_folder(original_folder, decompressed_folder, fixed_data_range=23000):
-    """
-    Calculate SSIM for all .dat files in two folders using a FIXED data range.
-    
-    Parameters:
-    -----------
-    original_folder : str
-        Path to folder with original .dat files (must contain data.json)
-    decompressed_folder : strs
-        Path to folder with decompressed .dat files
-    fixed_data_range : int
-        The absolute maximum pixel value of the camera (e.g., 16383 for 14-bit, 65535 for 16-bit)
-    """
-    dim_x, dim_y = get_dat_dimensions(original_folder)
-    
-    orig_files = natsorted([f for f in os.listdir(original_folder) if f.endswith('.dat')])
-    comp_files = natsorted([f for f in os.listdir(decompressed_folder) if f.endswith('.dat')])
-    
-    ssim_results = []
-    
-    for orig_file in orig_files:
-        if orig_file not in comp_files:
-            continue
-            
-        orig_path = os.path.join(original_folder, orig_file)
-        comp_path = os.path.join(decompressed_folder, orig_file)
-        
-        orig_data = np.fromfile(orig_path, dtype=np.uint16)
-        comp_data = np.fromfile(comp_path, dtype=np.uint16)
-        
-        frames = len(orig_data) // (dim_x * dim_y)
-        orig_frames = orig_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
-        comp_frames = comp_data[:frames * dim_x * dim_y].reshape(frames, dim_y, dim_x)
-        
-        file_ssim_scores = []
-        for i in range(frames):
-            orig_img = orig_frames[i]
-            comp_img = comp_frames[i]
-            
-            # FIX: Use the fixed, mathematically sound data range!
-            score = ssim(orig_img, comp_img, data_range=fixed_data_range)
-            file_ssim_scores.append(score)
-            
-        if file_ssim_scores:
-            ssim_results.append({
-                'original_file': orig_file,
-                'compressed_file': orig_file,
-                'ssim': np.median(file_ssim_scores) 
-            })
-            
-    return ssim_results
+
 
 
 # ============================================================================
@@ -472,7 +485,7 @@ def extract_k_lev(label):
         Folder name (e.g., 'sparz_k5_rt35_lev0')
         
     Returns:
-    --------
+    --------s
     tuple
         (kernel_size, compression_level)
     """
@@ -628,3 +641,144 @@ def analyze_grid_search_results(main_folder, original_files, file_extensions=['.
             })
     
     return pd.DataFrame(ssim_df_list)
+
+
+
+# ============================================================================
+# Structural Metrics (Volume, Shape, etc.)
+# ============================================================================
+from scipy.spatial import ConvexHull, QhullError
+
+def calculate_cluster_volume(coords):
+    """
+    Calculate the 3D Convex Hull volume of a point cloud.
+    
+    Parameters:
+    -----------
+    coords : np.ndarray or pd.DataFrame
+        (N, 3) array of x, y, z coordinates in nanometers.
+        
+    Returns:
+    --------
+    float
+        Volume in cubic micrometers (µm^3). Returns 0 if calculation fails.
+    """
+    if len(coords) < 4:
+        return 0.0  # Mathematically impossible to build a 3D shape with < 4 points
+        
+    try:
+        hull = ConvexHull(coords)
+        # hull.volume is in nm^3. 
+        # 1 cubic micrometer = 1,000,000,000 cubic nanometers (10^9)
+        volume_um3 = hull.volume / (10**9)
+        return volume_um3
+    except QhullError:
+        # This happens if points are perfectly flat (2D plane)
+        return 0.0
+    
+import numpy as np
+
+def calculate_voxel_volume(coords, voxel_size_nm=50.0):
+    """
+    Calculate the occupied volume of a point cloud using 3D Voxelization.
+    
+    Parameters:
+    -----------
+    coords : np.ndarray
+        (N, 3) array of x, y, z coordinates in nanometers.
+    voxel_size_nm : float
+        The length of one side of the voxel cube in nanometers.
+        
+    Returns:
+    --------
+    float
+        Volume in cubic micrometers (µm^3).
+    """
+    if len(coords) == 0:
+        return 0.0
+
+    # 1. Discretize coordinates into integer voxel indices
+    voxel_indices = np.floor(coords / voxel_size_nm).astype(int)
+    
+    # 2. Find unique occupied voxels
+    unique_voxels = np.unique(voxel_indices, axis=0)
+    
+    # 3. Calculate volume
+    # One voxel is (50 * 50 * 50) cubic nanometers
+    volume_per_voxel_nm3 = voxel_size_nm ** 3
+    total_volume_nm3 = len(unique_voxels) * volume_per_voxel_nm3
+    
+    # 4. Convert to cubic micrometers
+    return total_volume_nm3 / (10**9)
+
+import numpy as np
+
+def calculate_radius_of_gyration(coords):
+    """
+    Calculate the Radius of Gyration (Rg) for a point cloud.
+    
+    Parameters:
+    -----------
+    coords : np.ndarray
+        (N, 3) array of x, y, z coordinates in nanometers.
+        
+    Returns:
+    --------
+    float
+        Radius of Gyration in nanometers. Returns 0 if empty.
+    """
+    if len(coords) == 0:
+        return 0.0
+        
+    # 1. Find the center of mass (mean position in x, y, z)
+    center_of_mass = np.mean(coords, axis=0)
+    
+    # 2. Calculate squared distance of every point from the center of mass
+    sq_distances = np.sum((coords - center_of_mass)**2, axis=1)
+    
+    # 3. Rg is the square root of the mean of those squared distances
+    rg = np.sqrt(np.mean(sq_distances))
+    
+    return rg
+
+import numpy as np
+
+def calculate_fractional_anisotropy(coords):
+    """
+    Calculate the 3D Fractional Anisotropy (Shape asymmetry) of a point cloud.
+    0.0 = Perfect Sphere, 1.0 = Perfect Line.
+    """
+    if len(coords) < 4:
+        return 0.0
+        
+    # Calculate the covariance matrix of the 3D coordinates
+    cov_matrix = np.cov(coords, rowvar=False)
+    
+    # Extract the eigenvalues (the length of the 3 principal axes of the shape)
+    eigenvalues, _ = np.linalg.eigh(cov_matrix)
+    
+    # Sort them from largest to smallest
+    eigenvalues = np.sort(eigenvalues)[::-1]
+    L1, L2, L3 = eigenvalues[0], eigenvalues[1], eigenvalues[2]
+    
+    # Handle edge cases where variance is 0
+    if (L1**2 + L2**2 + L3**2) == 0:
+        return 0.0
+        
+    # Calculate Fractional Anisotropy (Standard MRI/Diffusion Tensor formula)
+    # Scales from 0 (isotropic sphere) to 1 (highly anisotropic line)
+    num = np.sqrt((L1 - L2)**2 + (L2 - L3)**2 + (L3 - L1)**2)
+    den = np.sqrt(L1**2 + L2**2 + L3**2)
+    
+    fa = np.sqrt(1/2) * (num / den)
+    return fa
+
+import numpy as np
+
+def calculate_center_of_mass(coords):
+    """
+    Calculate the exact 3D Center of Mass of a point cloud.
+    """
+    if len(coords) == 0:
+        return None
+    return np.mean(coords, axis=0)
