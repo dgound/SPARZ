@@ -2378,6 +2378,45 @@ def test_description_survives_and_output_is_one_series(tmp_path):
         np.testing.assert_array_equal(tifffile.imread(str(output)), original)
 
 
+def test_single_plane_block_sparse_keeps_uint16_values_above_int16_range():
+    """The fused single-plane path used to cast ROI values to int16, wrapping 60000 to -5536."""
+    obj = SPARZIP.__new__(SPARZIP)
+    obj.kernel_size = 3
+    obj.rel_threshold = 0.5
+    block = np.full((2, 9, 9), 100, dtype=np.uint16)
+    block[:, 4, 4] = 60000
+
+    roi = obj._process_block_to_sparse_single(block)
+    assert roi.dtype == np.uint16
+    assert roi.todense()[1, 4, 4] == 60000
+
+
+def _write_dat_dataset(folder, stack):
+    folder.mkdir()
+    T, H, W = stack.shape
+    with open(folder / "data.json", "w") as f:
+        json.dump({"value": {"Image": {"RecordDimX": W, "RecordDimY": H}}}, f)
+    stack.astype(np.uint16).tofile(str(folder / "img000.dat"))
+
+
+def test_biplane_dat_input_loads_both_planes_per_frame(tmp_path):
+    """bp2 .dat loading used an undefined raw_data, and biplane needs one frame per chunk."""
+    rng = np.random.default_rng(0)
+    bp1 = rng.integers(100, 300, size=(5, 12, 16)).astype(np.uint16)
+    bp2 = rng.integers(100, 300, size=(5, 12, 16)).astype(np.uint16)
+    bp1[3, 6, 8] = 50000
+    _write_dat_dataset(tmp_path / "bp1", bp1)
+    _write_dat_dataset(tmp_path / "bp2", bp2)
+
+    z = SPARZIP(path_image_files1=str(tmp_path / "bp1" / "*.dat"),
+                path_image_files2=str(tmp_path / "bp2" / "*.dat"),
+                stem="s", output_path=str(tmp_path) + "/", kernel_size=3, num_workers=1)
+    assert z.bp1[0].chunks[0] == (1,) * 5 and z.bp2[0].chunks[0] == (1,) * 5
+    np.testing.assert_array_equal(z.bp2[0].compute(), bp2)
+    # a peak in a later frame is found, not only in the first frame of the file
+    assert z.processed_bp1[0].compute().todense()[3, 6, 8] == 50000
+
+
 if __name__ == "__main__":
     if pytest is not None:
         raise SystemExit(pytest.main([__file__, "-v"]))

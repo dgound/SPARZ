@@ -1174,11 +1174,16 @@ class SPARZIP:
             for dat_file in files2:
                 file_bytes = os.path.getsize(dat_file)
                 img_nums = file_bytes // (dimX * dimY * 2)
-                p2.append(da.from_array(np.reshape(raw_data, (img_nums, dimY, dimX)), chunks=(1, dimY, dimX)) )
+                p2.append(da.from_delayed(self.load_dat_file(dat_file, dimX, dimY), shape=(img_nums, dimY, dimX), dtype='uint16'))
                 # Explicit cleanup of memory mapping to prevent memory leaks
                 
         else:
             raise ValueError(f'Unsupported file extension: {ext}')
+        if ext == '.dat':
+            # The biplane peak search works one frame per chunk (x[0]), so split the
+            # whole-file .dat chunks here. Single-plane keeps whole-file chunks.
+            p1 = [x.rechunk((1, dimY, dimX)) for x in p1]
+            p2 = [x.rechunk((1, dimY, dimX)) for x in p2]
         return p1, p2
 
     def to_16bit(self):
@@ -1336,7 +1341,8 @@ class SPARZIP:
         Hides the frame-by-frame loop from Dask to prevent Task Graph Overload
         """
         T, H, W = block.shape
-        masked_3d = np.zeros_like(block, dtype='int16')
+        # Keep the input dtype: casting uint16 to int16 wraps values above 32767
+        masked_3d = np.zeros_like(block)
 
         for t in range(T):
             frame_2d = block[t]
@@ -1346,7 +1352,7 @@ class SPARZIP:
                 mask = np.zeros(frame_2d.shape, dtype='int16')
                 mask[peaks[:, 0], peaks[:, 1]] = 1
                 kernel_mask = self.add_kernel(mask, self.kernel_size)
-                masked_3d[t] = np.where(kernel_mask, frame_2d, 0).astype('int16')
+                masked_3d[t] = np.where(kernel_mask, frame_2d, 0)
 
         return sparse.COO(masked_3d)
 
