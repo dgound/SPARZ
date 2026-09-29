@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "SPARZ"
+version = "1.0"
+description = "Compress Single Molecule Localization Microscopy Data"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [
+    { name = "Dimos Gkountaroulis", email = "dimos.gkountaroulis@bcm.edu" },
+    { name = "Laura Breimann" },
+    { name = "Antonios Lioutas" },
+    { name = "Lian Jiang" },
+]
+dependencies = [
+    "av",
+    "dask",
+    "dask-image",
+    "ffmpeg-python",
+    "jinja2",
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pims",
+    "PyQt6",
+    "scikit-image",
+    "scikit-video",
+    "scipy",
+    "sparse",
+    "statsmodels",
+    "tifffile",
+    "tqdm",
+    "zstandard",
+]
+
+[project.urls]
+Homepage = "https://github.com/dgound/SPARZ"
+
+[project.scripts]
+sparz = "cli:main_compress"
+unsparz = "cli:main_decompress"
+
+[project.gui-scripts]
+sparz-gui = "gui:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+py-modules = ["SPARZ", "cli", "gui"]
