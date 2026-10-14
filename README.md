@@ -1,14 +1,20 @@
-# SPARZ
+<p align="center">
+  <img src="extra_code/logo/sparz_logo.png" alt="SPARZ Logo" width="400"/>
+</p>
 
-SPARZ compresses Single Molecule Localization Microscopy (SMLM) image stacks by
-encoding each stack as video and, when ROI detection is enabled, storing the
-exact pixel values around detected peaks in sparse sidecars that are patched
-back in during reconstruction.
+<p align="center">
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+  <!img src="https://img.shields.io/badge/python-3.8%20%7C%203.9%20%7C%203.10%20%7C%203.11-blue" alt="Python Versions"!>
+  <!img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey" alt="Platforms"!>
+  <!-- <a href="YOUR_PAPER_LINK_HERE"><img src="https://img.shields.io/badge/Paper-Nature_Methods-red.svg" alt="Paper"></a> -->
+</p>
 
-The current pipeline supports TIFF and DAT inputs, single-plane and biplane
-data, optional TIFF metadata preservation, optional exact residual sidecars,
-and optional per-video MKV packaging. Inputs must be single-channel
-(grayscale). Multi-channel TIFFs are rejected with an error.
+> **SPARZ** compresses Single Molecule Localization Microscopy (SMLM) image stacks by encoding each stack as video. When ROI detection is enabled, it losslessly stores the exact pixel values around detected peaks in sparse sidecars that are seamlessly patched back in during reconstruction.
+
+The current pipeline supports TIFF and DAT inputs, single-plane and biplane data, optional TIFF metadata preservation, optional exact residual sidecars, and optional per-video MKV packaging. Inputs must be single-channel (grayscale). Multi-channel TIFFs are rejected with an error.
+
+---
+
 
 ## Installation
 
@@ -22,7 +28,7 @@ For development:
 pip install -e .
 ```
 
-FFmpeg and ffprobe must be available on `PATH`.
+**FFmpeg** and **ffprobe** must be available on `PATH`.
 
 - macOS: `brew install ffmpeg`
 - Linux: `sudo apt install ffmpeg`
@@ -70,9 +76,9 @@ u = UNSPARZ(
 u.run()
 ```
 
-`path_image_files1` and `path_image_files2` accept either a glob string or a
+*Note: `path_image_files1` and `path_image_files2` accept either a glob string or a
 list of file paths, for example to process only the files missing from an
-earlier run.
+earlier run.*
 
 ### GUI
 
@@ -89,13 +95,13 @@ one encoded video per input stack:
 <input_stem>_compression_level_<N>.<ext>
 ```
 
-When ROI detection is enabled for lossy codecs, it also writes:
+When **ROI detection** is enabled for lossy codecs, it also writes:
 
 ```text
 <input_stem>.npz
 ```
 
-When residuals are enabled through the Python API, it writes:
+When **residuals** are enabled through the Python API, it writes:
 
 ```text
 <input_stem>_compression_level_<N>_residual.zst
@@ -107,12 +113,12 @@ For `zstd`, SPARZ writes compressed arrays directly:
 <input_stem>_level_<N>.zst
 ```
 
-In biplane mode, if a bp1 and a bp2 input share a file name (for example
+**Biplane mode*:* If a bp1 and a bp2 input share a file name (for example
 `bp1/img.tif` and `bp2/img.tif`), that pair's outputs get a `_bp1` or `_bp2`
 suffix on the input stem (`img_bp1_compression_level_0.mp4`, `img_bp2.npz`)
 so the two planes do not overwrite each other.
 
-UNSPARZ writes one output per encoded video, named
+**UNSPARZ** writes one output per encoded video, named
 `<stem>_<video_stem>.tiff` (or `.dat`). When `--stem` is not given on the CLI,
 the stem is taken from the input file name, or is `output` when the pattern has
 no usable name (such as `"output/*.mp4"`).
@@ -139,7 +145,7 @@ levels generally spending more CPU for more compression.
 
 ## ROI and Residuals
 
-ROI detection is enabled by default. For lossy video codecs, SPARZ stores peak
+**ROI detection is enabled by default.** For lossy video codecs, SPARZ stores peak
 pixels in an `.npz` sidecar so UNSPARZ can patch them back during
 reconstruction. In biplane mode, both planes use the union of the peaks found
 in either plane.
@@ -150,7 +156,7 @@ median in the video only, which gives the encoder a smoother background. The
 intensities are still restored. The median patch is only applied when an `.npz`
 sidecar is written.
 
-Optional residual sidecars provide exact reconstruction for near-lossless video
+Optional **residual sidecars** provide exact reconstruction for near-lossless video
 codecs. Residuals are available through the Python API:
 
 ```python
@@ -165,7 +171,7 @@ z = SPARZIP(
 z.run(codec="x265", compression_level=1)
 ```
 
-Residual modes:
+**Residual modes:**
 
 - `auto`: uses `background` when ROI is enabled, otherwise `full`.
 - `background`: stores residuals outside ROI pixels and relies on ROI patching.
@@ -181,15 +187,11 @@ residuals by default when matching sidecars are present. Pass
 Set `extract_metadata=True` in Python or `--metadata` on the CLI to extract TIFF
 metadata before compression. DAT inputs do not carry TIFF metadata.
 
-Where the metadata is stored depends on the run:
+Storage location depends on the run:
 
-- When an ROI `.npz` sidecar is written, the metadata is embedded in it.
-- When no `.npz` is written (`ffv1`, `zstd`, or ROI detection off), SPARZ
-  writes dataset-level `<stem>_metadata_bp1.json` (and `_bp2.json`) files next
-  to the compressed outputs.
-- In Python, `save_metadata_to_json=True` always writes the JSON files.
-- For MKV packages, per-video metadata JSON is attached to the MKV whenever no
-  `.npz` carries it.
+- **ROI Enabled:** Embedded inside the `.npz` sidecar.
+- **ROI Disabled / ffv1 / zstd:** Written as a dataset-level `<stem>_metadata_bp1.json` next to outputs.
+- **MKV Packages:** Attached directly to the MKV
 
 UNSPARZ restores metadata when writing TIFF output, including the original
 `ImageDescription`. It looks for the metadata JSON in its output directory and
